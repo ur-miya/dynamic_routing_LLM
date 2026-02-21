@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# Данные (если не хотите хранить большие файлы в git)
+/data/raw/
+/data/processed/
+*.pkl
+*.joblib
+*.h5
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
