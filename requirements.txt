@@ -8,3 +8,7 @@ trl>=0.7.0
 requests>=2.31.0
 evaluate>=0.4.0
 bert-score>=0.3.13
+scikit-learn
+matplotlib
+seaborn
+tqdm

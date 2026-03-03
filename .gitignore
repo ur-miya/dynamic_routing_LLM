@@ -24,3 +24,15 @@ build/
 # Logs
 logs/
 *.log
+
+# Наши скрипты для проверки (не нужны в репозитории)
+check_batch.py
+check_data.py
+test_paralel.py
+
+# Выходные данные (результаты генерации, оценки)
+/outputs/
+outputs/
+evaluation_results.json
+teacher_student_answers.json
+test_prompts.txt
