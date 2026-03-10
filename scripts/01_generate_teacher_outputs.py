@@ -1,6 +1,7 @@
 # scripts/01_generate_teacher_outputs_parallel.py
 import sys
 import os
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
@@ -12,18 +13,29 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Будем использовать threading.Lock для безопасной записи чекпоинтов
 save_lock = threading.Lock()
 
 def process_single_prompt(args):
-    """Обрабатывает один промпт (для параллельного выполнения)."""
-    idx, prompt, teacher, gen_kwargs = args
+    idx, prompt, teacher, gen_kwargs, delay = args
+    if delay > 0:
+        time.sleep(delay)
     try:
         response = teacher.generate([prompt], **gen_kwargs)[0]
         return idx, response, True
     except Exception as e:
         print(f"Error processing prompt {idx}: {e}")
         return idx, "", False
+    
+def find_last_checkpoint(output_dir):
+    """Ищет последний сохранённый чекпоинт и возвращает DataFrame с уже обработанными данными."""
+    checkpoint_file = os.path.join(output_dir, 'checkpoint_latest.csv')
+    if os.path.exists(checkpoint_file):
+        print(f"Found checkpoint: {checkpoint_file}")
+        checkpoint_df = pd.read_csv(checkpoint_file)
+        return checkpoint_df
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description='Generate teacher responses in parallel')
@@ -45,73 +57,70 @@ def main():
                        help='Temperature for generation')
     parser.add_argument('--checkpoint_every', type=int, default=100,
                        help='Save checkpoint every N examples')
+    parser.add_argument('--no_think', action='store_true',
+                    help='Add /no_think to prompts to disable reasoning')
+    parser.add_argument('--request_delay', type=float, default=0.0,
+                    help='Delay in seconds before each request to reduce load')
     
     args = parser.parse_args()
     
-    # Проверяем входной файл
-    if not os.path.exists(args.input_file):
-        print(f"Error: Input file not found: {args.input_file}")
-        return
-    
-    # Создаем выходную директорию
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Загружаем данные
-    print(f"Loading data from {args.input_file}")
-    df = pd.read_csv(args.input_file)
-    
+    full_df = pd.read_csv(args.input_file)
     if args.max_samples:
-        df = df.head(args.max_samples)
-        print(f"Using {args.max_samples} samples")
+        full_df = full_df.head(args.max_samples)
+    total_samples = len(full_df)
+
+    # Проверяем чекпоинт
+    checkpoint_df = find_last_checkpoint(args.output_dir)
+    responses = [None] * total_samples
+    start_idx = 0
+
+    if checkpoint_df is not None:
+        processed = len(checkpoint_df)
+        if processed < total_samples:
+            print(f"Resuming from sample {processed}")
+            for i in range(processed):
+                responses[i] = checkpoint_df.iloc[i]['teacher_response']
+            start_idx = processed
+            df = full_df.iloc[processed:].reset_index(drop=True)
+        else:
+            print("All samples already processed.")
+            return
     else:
-        print(f"Using all {len(df)} samples")
-    
-    # Инициализируем учителя (ОДИН экземпляр для всех потоков)
-    print("Initializing teacher model...")
+        df = full_df.copy()
+        print("No checkpoint found. Starting from scratch.")
+
     teacher = TeacherModel()
-    
-    # Подготавливаем промпты
     prompts = df['prompt'].tolist()
-    
-    # Параметры генерации
     gen_kwargs = {
         'max_tokens': args.max_tokens,
-        'temperature': args.temperature
+        'temperature': args.temperature,
+        'no_think': args.no_think
     }
-    
-    # Создаём список задач
-    tasks = [(i, prompts[i], teacher, gen_kwargs) for i in range(len(prompts))]
-    
-    # Инициализируем список для результатов
-    responses = [None] * len(prompts)
-    
-    # Запускаем параллельную обработку
-    print(f"Generating responses with {args.num_workers} parallel workers...")
-    
+
+    # Создаём задачи с учётом сдвига индексов и задержки
+    tasks = [(start_idx + i, prompts[i], teacher, gen_kwargs, args.request_delay) 
+             for i in range(len(prompts))]
+
+    # Запуск параллельной обработки (process_single_prompt должна принимать delay)
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
         futures = [executor.submit(process_single_prompt, task) for task in tasks]
-        
-        # Используем tqdm для прогресс-бара
         with tqdm(total=len(futures), desc="Generating") as pbar:
             for future in as_completed(futures):
                 idx, response, success = future.result()
                 responses[idx] = response
                 pbar.update(1)
-                
+
                 # Сохраняем чекпоинт
-                if idx % args.checkpoint_every == 0 and idx > 0:
+                if idx % args.checkpoint_every == 0:
                     with save_lock:
-                        temp_df = df.iloc[:idx+1].copy()
-                        temp_df['teacher_response'] = responses[:idx+1]
+                        temp_df = full_df.copy()
+                        temp_df['teacher_response'] = responses
                         checkpoint_file = os.path.join(args.output_dir, 'checkpoint_latest.csv')
                         temp_df.to_csv(checkpoint_file, index=False)
     
-    # Добавляем ответы в DataFrame
-    df['teacher_response'] = responses
-    
-    # Сохраняем результаты
-    output_file = os.path.join(args.output_dir, f'teacher_outputs.csv')
-    df.to_csv(output_file, index=False)
+    full_df['teacher_response'] = responses
+    output_file = os.path.join(args.output_dir, 'teacher_outputs.csv')
+    full_df.to_csv(output_file, index=False)
     print(f"\nSaved results to {output_file}")
     
     # Статистика

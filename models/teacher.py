@@ -55,7 +55,7 @@ class TeacherModel(BaseModel):
 
         print(f"Initialized teacher model: {self.model_name} at {self.api_url}")
 
-    def generate(self, prompts: List[str], **kwargs) -> List[str]:
+    def generate(self, prompts: List[str], no_think: bool = False, **kwargs) -> List[str]:
         """
         Отправляет запросы к API учителя для каждого промпта.
 
@@ -75,9 +75,13 @@ class TeacherModel(BaseModel):
         top_p = kwargs.get('top_p', 0.9)
 
         for prompt in prompts:
+            if no_think:
+                prompt_to_use = prompt + " /no_think"
+            else:
+                prompt_to_use = prompt
             payload = {
                 "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": prompt_to_use}],
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p
