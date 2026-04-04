@@ -7,7 +7,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 import argparse
-from datetime import datetime
 from models.student import StudentModel
 import evaluate
 from bert_score import BERTScorer
@@ -67,7 +66,7 @@ def main():
     
     # Сохраняем сырые генерации
     df['student_response'] = student_responses
-    raw_output_file = os.path.join(args.output_dir, f'baseline_predictions_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+    raw_output_file = os.path.join(args.output_dir, f'baseline_predictions.csv')
     df.to_csv(raw_output_file, index=False)
     print(f"Raw predictions saved to {raw_output_file}")
     
@@ -99,7 +98,7 @@ def main():
     df['rougeL'] = per_sample_rouge['rougeL']
     df['bert_f1'] = per_sample_bert
     
-    detailed_output = os.path.join(args.output_dir, f'baseline_detailed_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+    detailed_output = os.path.join(args.output_dir, f'baseline_detailed.csv')
     df.to_csv(detailed_output, index=False)
     print(f"Detailed results saved to {detailed_output}")
     
@@ -117,7 +116,7 @@ def main():
     }
     
     summary_df = pd.DataFrame([summary])
-    summary_file = os.path.join(args.output_dir, f'baseline_summary_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+    summary_file = os.path.join(args.output_dir, f'baseline_summary.csv')
     summary_df.to_csv(summary_file, index=False)
     
     print("\n=== BASELINE SUMMARY ===")

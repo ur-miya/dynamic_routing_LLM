@@ -137,3 +137,61 @@ class TeacherModel(BaseModel):
             "api_url": self.api_url,
             "timeout": self.timeout
         }
+        
+    def generate_with_logprobs(self, prompts: List[str], top_logprobs: int = 10, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Отправляет запросы к API учителя и возвращает текст + логарифмические вероятности.
+
+        Args:
+        prompts: Список промптов.
+        top_logprobs: Количество альтернативных токенов на позицию.
+        **kwargs: max_tokens, temperature, top_p и др.
+
+        Returns:
+        Список словарей с ключами:
+            - 'text': сгенерированный текст
+            - 'logprobs': список токенов с logprob и top_logprobs (как от API)
+        """
+        max_tokens = kwargs.get('max_tokens', 512)
+        temperature = kwargs.get('temperature', 0.7)
+        top_p = kwargs.get('top_p', 0.9)
+
+        results = []
+        for prompt in prompts:
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "logprobs": True,
+                "top_logprobs": top_logprobs
+            }
+            # Добавляем любые другие переданные параметры
+            for key, value in kwargs.items():
+                if key not in payload:
+                    payload[key] = value
+
+            # Ретраи
+            for attempt in range(3):
+                try:
+                    response = requests.post(
+                        self.api_url,
+                        headers=self.headers,
+                        json=payload,
+                        timeout=self.timeout
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    choice = result["choices"][0]
+                    text = choice["message"]["content"]
+                    logprobs = choice.get("logprobs", {}).get("content", [])
+                    results.append({"text": text, "logprobs": logprobs})
+                    break
+                except Exception as e:
+                    print(f"Attempt {attempt+1} failed for prompt: {prompt[:50]}... Error: {e}")
+                    if attempt == 2:
+                        results.append({"text": "", "logprobs": []})
+                    else:
+                        time.sleep(self.retry_delay * (attempt + 1))
+        return results

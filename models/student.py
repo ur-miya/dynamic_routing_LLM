@@ -21,6 +21,7 @@ class StudentModel(BaseModel):
             device: Устройство для инференса ('cuda', 'cpu', или None для автоопределения)
         """
         self.model_name = model_name
+        hf_token = os.getenv("HF_TOKEN", None)
         
         # Определяем устройство
         if device is None:
@@ -31,10 +32,11 @@ class StudentModel(BaseModel):
         print(f"Loading student model {model_name} on {self.device}...")
         
         # Загружаем токенизатор и модель
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
         self.tokenizer.padding_side = 'left'
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
+            token=hf_token,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
             device_map=self.device,
             trust_remote_code=True

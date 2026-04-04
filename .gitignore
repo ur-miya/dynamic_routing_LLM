@@ -30,6 +30,7 @@ check_batch.py
 check_data.py
 test_paralel.py
 check_server_info.py
+check_logprobs.py
 
 # Выходные данные (результаты генерации, оценки)
 /outputs/
