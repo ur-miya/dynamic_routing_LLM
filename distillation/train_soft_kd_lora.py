@@ -13,6 +13,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
 from datasets import Dataset
 from dotenv import load_dotenv
+import pandas as pd
 
 from distillation.curriculum_utils import add_entropy_to_dataset, sort_dataset_by_entropy
 from distillation.soft_kd_loss import soft_kd_loss
@@ -53,17 +54,26 @@ def load_logprobs_dataset(file_path, max_samples):
 def tokenize_function(examples, tokenizer, max_length=512):
     texts = [f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n{r}<|im_end|>" 
              for p, r in zip(examples["prompt"], examples["teacher_response"])]
-    return tokenizer(texts, truncation=True, max_length=max_length, padding=False)
+    tokenized = tokenizer(texts, truncation=True, max_length=max_length, padding=False)
+    tokenized["teacher_logprobs"] = examples["teacher_logprobs"]
+    return tokenized
 
-def collate_fn(batch, tokenizer, max_length=512):
-    prompts = [b["prompt"] for b in batch]
-    responses = [b["teacher_response"] for b in batch]
-    teacher_logprobs = [b["teacher_logprobs"] for b in batch]
-    texts = [f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n{r}<|im_end|>" 
-             for p, r in zip(prompts, responses)]
-    tokenized = tokenizer(texts, truncation=True, max_length=max_length, padding=True, return_tensors="pt")
-    return {"input_ids": tokenized["input_ids"], "attention_mask": tokenized["attention_mask"], 
-            "teacher_logprobs": teacher_logprobs}
+def collate_fn(batch, tokenizer):
+    input_ids = [torch.tensor(item["input_ids"]) for item in batch]
+    attention_mask = [torch.tensor(item["attention_mask"]) for item in batch]
+    teacher_logprobs = [item["teacher_logprobs"] for item in batch]
+    
+    padded = tokenizer.pad(
+        {"input_ids": input_ids, "attention_mask": attention_mask},
+        padding=True,
+        return_tensors="pt"
+    )
+    
+    return {
+        "input_ids": padded["input_ids"],
+        "attention_mask": padded["attention_mask"],
+        "teacher_logprobs": teacher_logprobs
+    }
 
 def main():
     args = parse_args()
@@ -104,18 +114,21 @@ def main():
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    model.to(device)
+    # model.to(device)
     
     # Токенизация датасета
     dataset = dataset.map(lambda x: tokenize_function(x, tokenizer), batched=True)
-    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "teacher_logprobs"])
+    # dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "teacher_logprobs"])
     
     dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=not args.use_curriculum,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer)
+    dataset,
+    batch_size=args.batch_size,
+    shuffle=not args.use_curriculum,
+    collate_fn=lambda batch: collate_fn(batch, tokenizer) 
     )
+
+    loss_log = []   # для записи лосса на каждой итерации
+    global_step = 0
     
     # Оптимизатор
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
@@ -123,7 +136,6 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1*total_steps), num_training_steps=total_steps)
     
     # Обучение
-    global_step = 0
     for epoch in range(args.num_epochs):
         model.train()
         epoch_loss = 0.0
@@ -137,21 +149,46 @@ def main():
             logits = outputs.logits  # [batch, seq_len, vocab_size]
             
             total_loss = 0.0
+            valid_samples_in_batch = 0
             for i in range(logits.shape[0]):
-                # Обрезаем логиты до длины teacher_logprobs
                 max_len = min(logits.shape[1], len(teacher_logprobs_batch[i]))
                 if max_len == 0:
                     continue
                 loss = soft_kd_loss(
-                    logits[i, :max_len, :],
-                    teacher_logprobs_batch[i][:max_len],
-                    tokenizer,
-                    temperature=args.temperature,
-                    top_k=args.top_k
-                )
+                logits[i, :max_len, :],
+                teacher_logprobs_batch[i][:max_len],
+                tokenizer,
+                temperature=args.temperature,
+                top_k=args.top_k
+            )
+            # Пропускаем некорректные потери
+                if torch.isnan(loss) or torch.isinf(loss):
+                    if step % 100 == 0:
+                        print(f"[WARNING] Invalid loss for sample {i}: {loss.item()}")
+                    continue
                 total_loss += loss
-            total_loss = total_loss / logits.shape[0]
+                valid_samples_in_batch += 1
+
+            if valid_samples_in_batch == 0:
+                if step % 100 == 0:
+                    print(f"[WARNING] No valid samples in batch {step}, skipping")
+                continue  # пропускаем этот батч
+
+            total_loss = total_loss / valid_samples_in_batch  # усредняем по валидным примерам
             total_loss = total_loss / args.gradient_accumulation_steps
+
+            # Отладка
+            if step % 100 == 0:
+                print(f"\n[DEBUG] Step {step}:")
+                print(f"  valid_samples_in_batch: {valid_samples_in_batch}")
+                print(f"  total_loss (before div): {total_loss.item() * args.gradient_accumulation_steps:.6f}")
+                print(f"  total_loss (after div): {total_loss.item():.6f}")
+            # Сохраняем loss
+            loss_log.append({
+            "epoch": epoch,
+            "batch_step": step,
+            "loss": total_loss.item() * args.gradient_accumulation_steps
+            })
             total_loss.backward()
             epoch_loss += total_loss.item() * args.gradient_accumulation_steps
             
@@ -168,7 +205,12 @@ def main():
             
             progress.set_postfix({"loss": total_loss.item() * args.gradient_accumulation_steps})
         print(f"Epoch {epoch+1} avg loss: {epoch_loss / len(dataloader):.4f}")
-    
+    os.makedirs(args.output_dir, exist_ok=True)
+    # Сохраняем лог лосса
+    loss_df = pd.DataFrame(loss_log)
+    loss_df.to_csv(os.path.join(args.output_dir, "training_loss.csv"), index=False)
+    print(f"Training loss log saved to {os.path.join(args.output_dir, 'training_loss.csv')}")
+
     # Финальное сохранение
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)

@@ -5,11 +5,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import torch
+import gc
 from tqdm import tqdm
 import argparse
-from models.student import StudentModel
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import evaluate
 from bert_score import BERTScorer
 
@@ -25,16 +25,20 @@ def main():
                        default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                            'outputs/evaluation'),
                        help='Directory to save evaluation results')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=4,
                        help='Batch size for generation')
     parser.add_argument('--max_new_tokens', type=int, default=512,
                        help='Maximum new tokens for generation')
-    parser.add_argument('--device', type=str, default='cuda',
-                       help='Device to use (cuda/cpu)')
+    parser.add_argument('--device', type=str, default='cuda:0',
+                       help='Device to use (cuda:0, cuda:4, cpu)')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='Limit number of test samples (for debugging)')
     
     args = parser.parse_args()
+    
+    # Очистка памяти перед началом
+    torch.cuda.empty_cache()
+    gc.collect()
     
     # Проверка входного файла
     if not os.path.exists(args.test_file):
@@ -64,19 +68,18 @@ def main():
     # Инициализация модели студента с LoRA
     print(f"Loading base student model (Qwen2.5-1.5B)...")
     print(f"Loading LoRA from {args.lora_path}")
-    
-    # Загружаем базовую модель так же, как в StudentModel
-    from transformers import AutoTokenizer
+    print(f"Using device: {args.device}")
     
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
     tokenizer.padding_side = 'left'
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
+    # Загрузка базовой модели на указанное устройство
     base_model = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-1.5B-Instruct",
         torch_dtype=torch.float16,
-        device_map="auto"
+        device_map=args.device if args.device != 'cpu' else 'cpu'
     )
     
     # Загружаем LoRA адаптеры
@@ -87,35 +90,46 @@ def main():
     
     # Функция генерации (аналог StudentModel.generate)
     def generate_with_lora(prompts_batch, max_new_tokens=512):
-        """Генерация ответов с использованием LoRA модели."""
+        # Форматируем промпты так же, как при обучении
+        formatted_prompts = [
+            f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
+            for p in prompts_batch
+        ]
+    
         inputs = tokenizer(
-            prompts_batch, 
+            formatted_prompts, 
             return_tensors="pt", 
             padding=True, 
             truncation=True, 
             max_length=2048
-        ).to(args.device)
-        
+        )
+    
+        if args.device != 'cpu':
+            inputs = {k: v.to(args.device) for k, v in inputs.items()}
+    
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,  # жадная генерация для воспроизводимости
+                do_sample=False,
                 temperature=1.0,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,  
+                num_beams=1,   
+                repetition_penalty=1.0,  
+                early_stopping=False
             )
-        
+    
         responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
-        # Обрезаем промпт из ответа (оставляем только сгенерированную часть)
+    
+        # Удаляем промпт из ответа
         cleaned_responses = []
-        for prompt, response in zip(prompts_batch, responses):
-            # Удаляем prompt из начала ответа
-            if response.startswith(prompt):
-                response = response[len(prompt):].lstrip()
+        for formatted_prompt, response in zip(formatted_prompts, responses):
+            if response.startswith(formatted_prompt):
+                response = response[len(formatted_prompt):].lstrip()
             cleaned_responses.append(response)
-        
+    
         return cleaned_responses
     
     # Генерация ответов батчами
@@ -125,6 +139,10 @@ def main():
         batch_prompts = prompts[i:i+args.batch_size]
         batch_responses = generate_with_lora(batch_prompts, max_new_tokens=args.max_new_tokens)
         student_responses.extend(batch_responses)
+        
+        # Очищаем кэш после каждого батча
+        if args.device != 'cpu':
+            torch.cuda.empty_cache()
     
     # Сохраняем сырые генерации
     df['distilled_response'] = student_responses
@@ -134,7 +152,7 @@ def main():
     
     # Инициализация метрик
     rouge = evaluate.load('rouge')
-    bert_scorer = BERTScorer(lang='en', device=args.device)
+    bert_scorer = BERTScorer(lang='en', device=args.device if args.device != 'cpu' else 'cpu')
     
     # Расчёт метрик
     print("Calculating metrics...")
@@ -165,8 +183,9 @@ def main():
     print(f"Detailed results saved to {detailed_output}")
     
     # Сводная статистика
+    model_name = os.path.basename(args.lora_path)
     summary = {
-        'model_type': 'distilled_lora',
+        'model_type': model_name,
         'lora_path': args.lora_path,
         'rouge1_mean': df['rouge1'].mean(),
         'rouge1_std': df['rouge1'].std(),
@@ -180,7 +199,7 @@ def main():
     }
     
     summary_df = pd.DataFrame([summary])
-    summary_file = os.path.join(args.output_dir, f'distilled_summary.csv')
+    summary_file = os.path.join(args.output_dir, f'{model_name}_summary.csv')
     summary_df.to_csv(summary_file, index=False)
     
     print("\n=== DISTILLED MODEL SUMMARY ===")
@@ -201,10 +220,17 @@ def main():
             baseline_val = baseline_df[metric].values[0]
             distilled_val = summary[metric]
             change = distilled_val - baseline_val
-            change_pct = (change / baseline_val) * 100
+            change_pct = (change / baseline_val) * 100 if baseline_val != 0 else 0
             print(f"{metric:<20} {baseline_val:<12.4f} {distilled_val:<12.4f} {change:+.4f} ({change_pct:+.1f}%)")
     
     print(f"\nAll files saved to {args.output_dir}")
+    
+    # Финальная очистка
+    del model
+    del base_model
+    if args.device != 'cpu':
+        torch.cuda.empty_cache()
+    gc.collect()
 
 if __name__ == "__main__":
     main()

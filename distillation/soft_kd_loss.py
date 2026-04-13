@@ -2,18 +2,15 @@
 import math
 import torch
 import torch.nn.functional as F
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 def soft_kd_loss(
-    student_logits: torch.Tensor,          # [seq_len, vocab_size]
-    teacher_logprobs_list: List[Dict],     # список токенов учителя с top_logprobs
+    student_logits: torch.Tensor,
+    teacher_logprobs_list: List[Dict],
     student_tokenizer,
     temperature: float = 2.0,
     top_k: int = 10,
 ) -> torch.Tensor:
-    """
-    KL divergence между распределением учителя (на топ-K токенах) и студента.
-    """
     seq_len = student_logits.shape[0]
     kd_loss = 0.0
     valid_positions = 0
@@ -24,37 +21,60 @@ def soft_kd_loss(
         if not top_logprobs:
             continue
         
-        # Извлекаем топ-K токенов и их вероятности
-        tokens = []
-        probs = []
+        teacher_tokens = []
+        teacher_probs = []
         for item in top_logprobs[:top_k]:
             token_str = item['token']
             logp = item['logprob']
             prob = math.exp(logp)
-            tokens.append(token_str)
-            probs.append(prob)
+            teacher_tokens.append(token_str)
+            teacher_probs.append(prob)
         
-        total = sum(probs)
+        if not teacher_tokens:
+            continue
+        
+        total = sum(teacher_probs)
         if total == 0:
             continue
-        teacher_probs = torch.tensor([p / total for p in probs], device=student_logits.device)
+        teacher_probs = [p / total for p in teacher_probs]
         
-        # Преобразуем токены в индексы
-        token_ids = []
-        for t in tokens:
-            tid = student_tokenizer.convert_tokens_to_ids(t)
-            if tid == student_tokenizer.unk_token_id:
-                continue
-            token_ids.append(tid)
+        valid_indices = []
+        valid_teacher_probs = []
+        for i, token_str in enumerate(teacher_tokens):
+            tid = student_tokenizer.convert_tokens_to_ids(token_str)
+            if tid != student_tokenizer.unk_token_id:
+                valid_indices.append(tid)
+                valid_teacher_probs.append(teacher_probs[i])
         
-        if not token_ids:
+        if not valid_indices:
             continue
         
-        student_logits_for_tokens = student_logits[pos, token_ids] / temperature
-        student_probs = F.softmax(student_logits_for_tokens, dim=0)
-        log_student_probs = torch.log(student_probs + 1e-8)
+        total_valid = sum(valid_teacher_probs)
+        if total_valid == 0:
+            continue
+        valid_teacher_probs = [p / total_valid for p in valid_teacher_probs]
         
-        kl = F.kl_div(log_student_probs, teacher_probs, reduction='batchmean')
+        student_logits_for_tokens = student_logits[pos, valid_indices] / temperature
+        
+        # Защита от слишком больших значений
+        student_logits_for_tokens = torch.clamp(student_logits_for_tokens, min=-50, max=50)
+        
+        student_probs = F.softmax(student_logits_for_tokens, dim=0)
+        student_probs = torch.clamp(student_probs, min=1e-8, max=1.0)
+        log_student_probs = torch.log(student_probs)
+        
+        teacher_probs_tensor = torch.tensor(valid_teacher_probs, device=student_logits.device)
+        teacher_probs_tensor = torch.clamp(teacher_probs_tensor, min=1e-8, max=1.0)
+        
+        # Проверка на NaN перед вычислением
+        if torch.isnan(student_probs).any() or torch.isnan(teacher_probs_tensor).any():
+            continue
+            
+        kl = F.kl_div(log_student_probs, teacher_probs_tensor, reduction='batchmean')
+        
+        if torch.isnan(kl):
+            continue
+            
         kd_loss += kl
         valid_positions += 1
     
