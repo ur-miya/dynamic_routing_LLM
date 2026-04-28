@@ -80,15 +80,15 @@ def main():
     GRADIENT_ACCUMULATION_STEPS = 16
     
     # Пути
-    softkd_model_dir = os.path.join(BASE_DIR, "outputs/softkd_model")
-    distillm2_model_dir = os.path.join(BASE_DIR, "outputs/distillm2_model")
+    softkd_model_dir = os.path.join(BASE_DIR, "outputs/softkd_model_5k_v2")
+    distillm2_model_dir = os.path.join(BASE_DIR, "outputs/distillm2_model_5k_v3")
     eval_dir = os.path.join(BASE_DIR, "outputs/evaluation")
     
     os.makedirs(eval_dir, exist_ok=True)
     
     # Файлы с результатами оценки
-    softkd_eval_file = os.path.join(eval_dir, "softkd_model_summary.csv")
-    distillm2_eval_file = os.path.join(eval_dir, "distillm2_model_summary.csv")
+    softkd_eval_file = os.path.join(eval_dir, "softkd_model_5k_v2_summary.csv")
+    distillm2_eval_file = os.path.join(eval_dir, "distillm2_model_5k_v3_summary.csv")
     
     missing_files = []
     if not os.path.exists(softkd_eval_file):
@@ -154,7 +154,7 @@ def main():
                  fontsize=10, color='steelblue', fontweight='normal')
     
     plt.tight_layout()
-    softkd_loss_file = os.path.join(eval_dir, "loss_curve_softkd.png")
+    softkd_loss_file = os.path.join(eval_dir, "loss_curve_softkd_5k_v2.png")
     plt.savefig(softkd_loss_file, dpi=150)
     plt.close()
     print(f"  SoftKD loss curve saved to {softkd_loss_file}")
@@ -197,7 +197,7 @@ def main():
       #       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     plt.tight_layout()
-    distillm2_loss_file = os.path.join(eval_dir, "loss_curve_distillm2.png")
+    distillm2_loss_file = os.path.join(eval_dir, "loss_curve_distillm2_5k_v3.png")
     plt.savefig(distillm2_loss_file, dpi=150)
     plt.close()
     print(f"  DistiLLM-2 loss curve saved to {distillm2_loss_file}")
@@ -242,7 +242,7 @@ def main():
     ax3.set_ylim(0, max_val * 1.15)
     
     plt.tight_layout()
-    metrics_file = os.path.join(eval_dir, "metrics_comparison.png")
+    metrics_file = os.path.join(eval_dir, "metrics_comparison_5k_v3.png")
     plt.savefig(metrics_file, dpi=150)
     plt.close()
     print(f"  Metrics comparison saved to {metrics_file}")

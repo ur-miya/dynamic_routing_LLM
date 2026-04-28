@@ -11,4 +11,8 @@ bert-score>=0.3.13
 scikit-learn
 matplotlib
 seaborn
+pandas
+numpy
 tqdm
+py-irt
+sentence-transformers

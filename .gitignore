@@ -31,6 +31,11 @@ check_data.py
 test_paralel.py
 check_server_info.py
 check_logprobs.py
+check_tokenizer_mismatch.py
+diagnose_student_responses.py
+
+# вспомогательные папки
+scripts/routing/diagnostics/
 
 # Выходные данные (результаты генерации, оценки)
 /outputs/

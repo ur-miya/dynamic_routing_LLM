@@ -1,128 +1,235 @@
+#!/usr/bin/env python3
 # scripts/02_evaluate_baseline.py
+"""
+Оценка базовой модели студента на test.csv (или любом другом CSV).
+Генерирует ответы + UQ-метрики (mean_token_entropy, max_token_entropy, seq_nll).
+
+Запуск:
+    CUDA_VISIBLE_DEVICES=7 \
+    python scripts/02_evaluate_baseline.py \
+        --test_file data/raw/oasst1/test.csv \
+        --output_dir outputs/evaluation \
+        --batch_size 4 \
+        --device cuda:0
+"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import argparse
+import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-import argparse
-from models.student import StudentModel
 import evaluate
-from bert_score import BERTScorer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+# ──────────────────────────────────────────────
+# Генерация с UQ-метриками (общая функция, как в 08)
+# ──────────────────────────────────────────────
+
+def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_size=4):
+    responses, uq_list = [], []
+
+    for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
+        batch = prompts[i: i + batch_size]
+        formatted = [
+            f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
+            for p in batch
+        ]
+        inputs = tokenizer(
+            formatted, return_tensors="pt", padding=True,
+            truncation=True, max_length=2048,
+        )
+        if device != "cpu":
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            gen_out = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+
+        sequences = gen_out.sequences
+        scores = gen_out.scores
+        pad_id = tokenizer.pad_token_id
+        eos_id = tokenizer.eos_token_id
+
+        for idx in range(len(batch)):
+            actual_input_len = inputs["input_ids"][idx].shape[0]
+            new_ids = sequences[idx][actual_input_len:]
+
+            eos_pos = (new_ids == eos_id).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                new_ids = new_ids[:eos_pos[0].item()]
+            new_ids = new_ids[new_ids != pad_id]
+
+            response = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+            responses.append(response)
+
+            sample_scores = [s[idx] for s in scores[:max(len(new_ids), 1)]]
+            entropies, nlls, first_entropies = [], [], []
+            for step, (logits, tid) in enumerate(zip(sample_scores, new_ids)):
+                probs = torch.softmax(logits.float(), dim=-1)
+                H = -torch.sum(probs * torch.log(probs + 1e-9)).item()
+                entropies.append(H)
+                if step == 0:
+                    first_entropies.append(H)
+                log_probs = torch.log_softmax(logits.float(), dim=-1)
+                nlls.append(-log_probs[tid].item())
+
+            uq_list.append({
+                "mean_token_entropy":  float(np.mean(entropies))  if entropies else 0.0,
+                "max_token_entropy":   float(np.max(entropies))   if entropies else 0.0,
+                "first_token_entropy": float(entropies[0])        if entropies else 0.0,
+                "seq_nll":             float(np.mean(nlls))       if nlls else 0.0,
+            })
+
+        if device != "cpu":
+            torch.cuda.empty_cache()
+
+    return responses, uq_list
+
+
+# ──────────────────────────────────────────────
+# Главная функция
+# ──────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate baseline student model on test set')
-    parser.add_argument('--test_file', type=str,
-                       default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                           'data/raw/oasst1/test.csv'),
-                       help='Path to test CSV file')
-    parser.add_argument('--output_dir', type=str,
-                       default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                           'outputs/evaluation'),
-                       help='Directory to save evaluation results')
-    parser.add_argument('--batch_size', type=int, default=8,
-                       help='Batch size for generation')
-    parser.add_argument('--max_new_tokens', type=int, default=512,
-                       help='Maximum new tokens for generation')
-    parser.add_argument('--device', type=str, default='cuda',
-                       help='Device to use (cuda/cpu)')
-    parser.add_argument('--max_samples', type=int, default=None,
-                       help='Limit number of test samples (for debugging)')
-    
+    parser = argparse.ArgumentParser(
+        description='Evaluate baseline student model: generate responses + UQ metrics'
+    )
+    parser.add_argument(
+        '--test_file', type=str,
+        default=os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data/raw/oasst1/test.csv'
+        ),
+        help='Input CSV with prompt/reply columns'
+    )
+    parser.add_argument(
+        '--output_dir', type=str,
+        default=os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'outputs/evaluation'
+        ),
+    )
+    parser.add_argument('--batch_size',     type=int, default=4)
+    parser.add_argument('--max_new_tokens', type=int, default=512)
+    parser.add_argument('--device',         type=str, default='cuda:0')
+    parser.add_argument(
+        '--max_samples', type=int, default=None,
+        help='Limit number of samples (for debugging)'
+    )
+    parser.add_argument(
+        '--output_prefix', type=str, default='baseline',
+        help='Prefix for output files: <prefix>_detailed.csv, <prefix>_summary.csv'
+    )
+    # Базовая модель (студент без LoRA)
+    parser.add_argument(
+        '--base_model', type=str,
+        default='Qwen/Qwen2.5-1.5B-Instruct',
+        help='HuggingFace model name for student (base, no LoRA)'
+    )
     args = parser.parse_args()
-    
-    # Проверка входного файла
+
     if not os.path.exists(args.test_file):
-        print(f"Error: Test file not found: {args.test_file}")
+        print(f"Error: input file not found: {args.test_file}")
         return
-    
-    # Создание выходной директории
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Загрузка тестовых данных
-    print(f"Loading test data from {args.test_file}")
+
+    # ── Загрузка данных ──
+    print(f"Loading data from {args.test_file}")
     df = pd.read_csv(args.test_file)
     if args.max_samples:
         df = df.head(args.max_samples)
-        print(f"Using {args.max_samples} samples (limited)")
-    else:
-        print(f"Using all {len(df)} test samples")
-    
-    prompts = df['prompt'].tolist()
-    references = df['reply'].tolist()  # оригинальные ответы из датасета
-    
-    # Инициализация модели студента
-    print("Initializing student model...")
-    student = StudentModel(device=args.device)
-    
-    # Генерация ответов батчами
-    print(f"Generating responses (batch size={args.batch_size})...")
-    student_responses = []
-    for i in tqdm(range(0, len(prompts), args.batch_size), desc="Generating"):
-        batch_prompts = prompts[i:i+args.batch_size]
-        batch_responses = student.generate(batch_prompts, max_new_tokens=args.max_new_tokens)
-        student_responses.extend(batch_responses)
-    
-    # Сохраняем сырые генерации
-    df['student_response'] = student_responses
-    raw_output_file = os.path.join(args.output_dir, f'baseline_predictions.csv')
-    df.to_csv(raw_output_file, index=False)
-    print(f"Raw predictions saved to {raw_output_file}")
-    
-    # Инициализация метрик
-    rouge = evaluate.load('rouge')
-    bert_scorer = BERTScorer(lang='en', device=args.device)
-    
-    # Расчёт метрик
-    print("Calculating metrics...")
-    
-    # ROUGE
-    rouge_results = rouge.compute(predictions=student_responses, references=references)
-    print(f"\nROUGE scores:")
-    for key, val in rouge_results.items():
-        print(f"  {key}: {val:.4f}")
-    
-    # BERTScore
-    P, R, F1 = bert_scorer.score(student_responses, references)
-    bert_f1 = F1.mean().item()
-    print(f"\nBERTScore F1: {bert_f1:.4f}")
-    
-    # Сохраняем метрики по каждому примеру
-    print("Computing per-sample metrics...")
-    per_sample_rouge = rouge.compute(predictions=student_responses, references=references, use_aggregator=False)
-    per_sample_bert = F1.tolist()  # уже посчитали выше
-    
-    df['rouge1'] = per_sample_rouge['rouge1']
-    df['rouge2'] = per_sample_rouge['rouge2']
-    df['rougeL'] = per_sample_rouge['rougeL']
-    df['bert_f1'] = per_sample_bert
-    
-    detailed_output = os.path.join(args.output_dir, f'baseline_detailed.csv')
-    df.to_csv(detailed_output, index=False)
-    print(f"Detailed results saved to {detailed_output}")
-    
-    # Сводная статистика
+    print(f"Samples: {len(df)}")
+
+    prompts    = df["prompt"].tolist()
+    references = df["reply"].tolist()
+
+    # ── Загрузка модели ──
+    print(f"Loading model: {args.base_model}")
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=torch.float16,
+        device_map=args.device,
+    )
+    model.eval()
+
+    # ── Генерация ответов + UQ ──
+    student_responses, uq_list = generate_with_uq(
+        model, tokenizer, prompts,
+        max_new_tokens=args.max_new_tokens,
+        device=args.device,
+        batch_size=args.batch_size,
+    )
+
+    del model
+    torch.cuda.empty_cache()
+
+    # ── UQ-столбцы → DataFrame ──
+    df["student_response"] = student_responses
+    for col in ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]:
+        df[col] = [uq[col] for uq in uq_list]
+
+    # ── ROUGE ──
+    print("Computing ROUGE...")
+    rouge = evaluate.load("rouge")
+    rouge_agg  = rouge.compute(predictions=student_responses, references=references)
+    rouge_per  = rouge.compute(predictions=student_responses, references=references,
+                               use_aggregator=False)
+    df["rouge1"] = rouge_per["rouge1"]
+    df["rouge2"] = rouge_per["rouge2"]
+    df["rougeL"] = rouge_per["rougeL"]
+
+    # ── BERTScore ──
+    print("Computing BERTScore...")
+    bertscore = evaluate.load("bertscore")
+    bs = bertscore.compute(
+        predictions=student_responses, references=references,
+        lang="en", model_type="roberta-large", device=args.device,
+    )
+    df["bert_f1"] = bs["f1"]
+
+    # ── Сохранение ──
+    detailed_path = os.path.join(args.output_dir, f"{args.output_prefix}_detailed.csv")
+    df.to_csv(detailed_path, index=False)
+    print(f"Detailed results saved → {detailed_path}")
+
+    # Сводка
     summary = {
-        'rouge1_mean': df['rouge1'].mean(),
-        'rouge1_std': df['rouge1'].std(),
-        'rouge2_mean': df['rouge2'].mean(),
-        'rouge2_std': df['rouge2'].std(),
-        'rougeL_mean': df['rougeL'].mean(),
-        'rougeL_std': df['rougeL'].std(),
-        'bert_f1_mean': df['bert_f1'].mean(),
-        'bert_f1_std': df['bert_f1'].std(),
-        'num_samples': len(df)
+        "num_samples":   len(df),
+        "rouge1_mean":   df["rouge1"].mean(),
+        "rouge2_mean":   df["rouge2"].mean(),
+        "rougeL_mean":   df["rougeL"].mean(),
+        "bert_f1_mean":  df["bert_f1"].mean(),
+        "mean_entropy_mean": df["mean_token_entropy"].mean(),
+        "seq_nll_mean":  df["seq_nll"].mean(),
     }
-    
-    summary_df = pd.DataFrame([summary])
-    summary_file = os.path.join(args.output_dir, f'baseline_summary.csv')
-    summary_df.to_csv(summary_file, index=False)
-    
-    print("\n=== BASELINE SUMMARY ===")
+    pd.DataFrame([summary]).to_csv(
+        os.path.join(args.output_dir, f"{args.output_prefix}_summary.csv"), index=False
+    )
+
+    print("\n=== SUMMARY ===")
     for k, v in summary.items():
-        print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
-    print(f"\nAll files saved to {args.output_dir}")
+        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+
+    print(f"\nUQ columns included: mean_token_entropy, max_token_entropy, "
+          f"first_token_entropy, seq_nll")
+    print(f"All files saved to {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()

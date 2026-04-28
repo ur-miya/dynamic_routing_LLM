@@ -191,13 +191,17 @@ def main():
     )
     
     # Оптимизатор и scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     total_steps = len(dataloader) * args.num_epochs // args.gradient_accumulation_steps
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1*total_steps), num_training_steps=total_steps)
     
     # Лог лоссов
     loss_log = []
     global_step = 0
+    # Early stopping parameters
+    best_loss = float('inf')
+    patience = 3
+    patience_counter = 0
     
     for epoch in range(args.num_epochs):
         model.train()
@@ -309,6 +313,22 @@ def main():
         
         avg_epoch_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
         print(f"Epoch {epoch+1} avg loss: {avg_epoch_loss:.4f}")
+
+        # Early stopping check
+        avg_loss = avg_epoch_loss
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            os.makedirs(args.output_dir, exist_ok=True)
+            model.save_pretrained(os.path.join(args.output_dir, "best_model"))
+            tokenizer.save_pretrained(os.path.join(args.output_dir, "best_model"))
+            print(f"  New best loss: {best_loss:.4f}, model saved")
+        else:
+            patience_counter += 1
+            print(f"  Loss didn't improve ({avg_loss:.4f} vs best {best_loss:.4f}), patience: {patience_counter}/{patience}")
+            if patience_counter >= patience:
+                print(f"  Early stopping triggered after epoch {epoch+1}")
+                break
     
     # Сохраняем модель и лог
     os.makedirs(args.output_dir, exist_ok=True)

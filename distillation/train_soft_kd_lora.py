@@ -129,9 +129,12 @@ def main():
 
     loss_log = []   # для записи лосса на каждой итерации
     global_step = 0
+    best_loss = float('inf')
+    patience = 3
+    patience_counter = 0
     
     # Оптимизатор
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     total_steps = len(dataloader) * args.num_epochs // args.gradient_accumulation_steps
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1*total_steps), num_training_steps=total_steps)
     
@@ -205,6 +208,23 @@ def main():
             
             progress.set_postfix({"loss": total_loss.item() * args.gradient_accumulation_steps})
         print(f"Epoch {epoch+1} avg loss: {epoch_loss / len(dataloader):.4f}")
+
+        # Early stopping check
+        avg_loss = epoch_loss / len(dataloader)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            os.makedirs(args.output_dir, exist_ok=True)
+            model.save_pretrained(os.path.join(args.output_dir, "best_model"))
+            tokenizer.save_pretrained(os.path.join(args.output_dir, "best_model"))
+            print(f"  New best loss: {best_loss:.4f}, model saved")
+        else:
+            patience_counter += 1
+            print(f"  Loss didn't improve ({avg_loss:.4f} vs best {best_loss:.4f}), patience: {patience_counter}/{patience}")
+            if patience_counter >= patience:
+                print(f"  Early stopping triggered after epoch {epoch+1}")
+                break
+            
     os.makedirs(args.output_dir, exist_ok=True)
     # Сохраняем лог лосса
     loss_df = pd.DataFrame(loss_log)

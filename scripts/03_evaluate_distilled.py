@@ -146,7 +146,7 @@ def main():
     
     # Сохраняем сырые генерации
     df['distilled_response'] = student_responses
-    raw_output_file = os.path.join(args.output_dir, f'distilled_predictions.csv')
+    raw_output_file = os.path.join(args.output_dir, f'distilled_predictions_5k.csv')
     df.to_csv(raw_output_file, index=False)
     print(f"Raw predictions saved to {raw_output_file}")
     
@@ -178,7 +178,7 @@ def main():
     df['rougeL'] = per_sample_rouge['rougeL']
     df['bert_f1'] = per_sample_bert
     
-    detailed_output = os.path.join(args.output_dir, f'distilled_detailed.csv')
+    detailed_output = os.path.join(args.output_dir, f'distilled_detailed_5k.csv')
     df.to_csv(detailed_output, index=False)
     print(f"Detailed results saved to {detailed_output}")
     

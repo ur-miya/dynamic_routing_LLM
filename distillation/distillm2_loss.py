@@ -1,20 +1,74 @@
 """
 DistiLLM-2 loss functions: SKL and SRKL with token-level decomposition.
+Subword fallback for token mismatches between teacher and student tokenizers.
 """
 
 import torch
 import torch.nn.functional as F
 import math
+from typing import List, Dict, Optional, Tuple
 
-def filter_valid_tokens(tokens, teacher_probs, tokenizer, device):
-    """Фильтрует токены, которые есть в словаре студента."""
+
+def get_token_ids_with_fallback(
+    token_str: str,
+    student_tokenizer,
+    token_bytes: Optional[List[int]] = None
+) -> Tuple[List[int], List[float]]:
+    """
+    Преобразует токен в ID с fallback на субвордное разбиение.
+    
+    Returns:
+        Tuple[List[int], List[float]]: (список ID токенов, список весов для каждого)
+    """
+    # 1. Прямое преобразование
+    tid = student_tokenizer.convert_tokens_to_ids(token_str)
+    if tid != student_tokenizer.unk_token_id:
+        return [tid], [1.0]
+    
+    # 2. Пробуем декодировать байты (если есть)
+    if token_bytes:
+        try:
+            decoded = bytes(token_bytes).decode('utf-8', errors='ignore')
+            subwords = student_tokenizer.tokenize(decoded)
+            if subwords:
+                ids = student_tokenizer.convert_tokens_to_ids(subwords)
+                weight = 1.0 / len(ids)
+                return ids, [weight] * len(ids)
+        except Exception:
+            pass
+    
+    # 3. Пробуем токенизировать строку напрямую
+    subwords = student_tokenizer.tokenize(token_str)
+    if subwords:
+        ids = student_tokenizer.convert_tokens_to_ids(subwords)
+        weight = 1.0 / len(ids)
+        return ids, [weight] * len(ids)
+    
+    return [], []
+
+
+def filter_valid_tokens_with_fallback(
+    tokens: List[str],
+    teacher_probs: List[float],
+    student_tokenizer,
+    teacher_bytes_list: Optional[List[Optional[List[int]]]] = None
+) -> Tuple[List[int], List[float], int]:
+    """
+    Фильтрует токены с fallback на субворды.
+    
+    Returns:
+        Tuple[List[int], List[float], int]: (ID токенов, вероятности, количество)
+    """
     valid_indices = []
     valid_probs = []
+    
     for i, token_str in enumerate(tokens):
-        tid = tokenizer.convert_tokens_to_ids(token_str)
-        if tid != tokenizer.unk_token_id:
+        token_bytes = teacher_bytes_list[i] if teacher_bytes_list else None
+        ids, weights = get_token_ids_with_fallback(token_str, student_tokenizer, token_bytes)
+        
+        for j, tid in enumerate(ids):
             valid_indices.append(tid)
-            valid_probs.append(teacher_probs[i])
+            valid_probs.append(teacher_probs[i] * weights[j])
     
     if not valid_indices:
         return [], [], 0
@@ -28,11 +82,19 @@ def filter_valid_tokens(tokens, teacher_probs, tokenizer, device):
     return valid_indices, valid_probs, len(valid_indices)
 
 
-def compute_skl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.1, top_k=10, temperature=2.0, debug=False):
+def compute_skl_loss(
+    student_logits: torch.Tensor,
+    teacher_logprobs_list: List[Dict],
+    tokenizer,
+    alpha: float = 0.1,
+    top_k: int = 10,
+    temperature: float = 2.0,
+    debug: bool = False
+) -> torch.Tensor:
     """
     SKL: D_SKL^{alpha}(p || q) = KL(p || alpha*p + (1-alpha)*q)
     student_logits: [seq_len, vocab_size]
-    teacher_logprobs_list: list of dicts with 'top_logprobs' (list of {token, logprob})
+    teacher_logprobs_list: list of dicts with 'top_logprobs' (list of {token, logprob, bytes})
     """
     seq_len = student_logits.shape[0]
     loss = 0.0
@@ -48,15 +110,18 @@ def compute_skl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.1
         
         total_teacher_tokens += 1
         
-        # Извлекаем топ-K токенов и вероятности учителя
+        # Извлекаем топ-K токенов, вероятности и bytes
         tokens = []
         teacher_probs = []
+        teacher_bytes = []
+        
         for item in top_logprobs[:top_k]:
-            token_str = item['token']
-            logp = item['logprob']
-            prob = math.exp(logp)
+            token_str = item.get('token', '')
+            logp = item.get('logprob', -float('inf'))
+            prob = math.exp(logp) if logp != -float('inf') else 0.0
             tokens.append(token_str)
             teacher_probs.append(prob)
+            teacher_bytes.append(item.get('bytes', None))
         
         if not tokens:
             continue
@@ -66,9 +131,9 @@ def compute_skl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.1
             continue
         teacher_probs = [p / total_teacher for p in teacher_probs]
         
-        # Фильтруем токены, которые есть в словаре студента
-        valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens(
-            tokens, teacher_probs, tokenizer, student_logits.device
+        # Фильтруем токены с fallback на субворды
+        valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens_with_fallback(
+            tokens, teacher_probs, tokenizer, teacher_bytes
         )
         
         if num_valid == 0:
@@ -96,19 +161,28 @@ def compute_skl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.1
         
         if torch.isnan(kl) or torch.isinf(kl):
             continue
-            
+        
         loss += kl
         valid_tokens += 1
     
     if debug and valid_tokens == 0:
-        print(f"[DEBUG SKL] total_teacher_tokens={total_teacher_tokens}, total_filtered_tokens={total_filtered_tokens}, valid_tokens={valid_tokens}")
+        print(f"[DEBUG SKL] total_teacher_tokens={total_teacher_tokens}, "
+              f"total_filtered_tokens={total_filtered_tokens}, valid_tokens={valid_tokens}")
     
     if valid_tokens == 0:
         return torch.tensor(0.0, device=student_logits.device, requires_grad=True)
     return loss / valid_tokens
 
 
-def compute_srkl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.1, top_k=10, temperature=2.0, debug=False):
+def compute_srkl_loss(
+    student_logits: torch.Tensor,
+    teacher_logprobs_list: List[Dict],
+    tokenizer,
+    alpha: float = 0.1,
+    top_k: int = 10,
+    temperature: float = 2.0,
+    debug: bool = False
+) -> torch.Tensor:
     """
     SRKL: D_SRKL^{alpha}(p || q) = KL(q || (1-alpha)*p + alpha*q)
     """
@@ -128,12 +202,15 @@ def compute_srkl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.
         
         tokens = []
         teacher_probs = []
+        teacher_bytes = []
+        
         for item in top_logprobs[:top_k]:
-            token_str = item['token']
-            logp = item['logprob']
-            prob = math.exp(logp)
+            token_str = item.get('token', '')
+            logp = item.get('logprob', -float('inf'))
+            prob = math.exp(logp) if logp != -float('inf') else 0.0
             tokens.append(token_str)
             teacher_probs.append(prob)
+            teacher_bytes.append(item.get('bytes', None))
         
         if not tokens:
             continue
@@ -143,9 +220,9 @@ def compute_srkl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.
             continue
         teacher_probs = [p / total_teacher for p in teacher_probs]
         
-        # Фильтруем токены, которые есть в словаре студента
-        valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens(
-            tokens, teacher_probs, tokenizer, student_logits.device
+        # Фильтруем токены с fallback на субворды
+        valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens_with_fallback(
+            tokens, teacher_probs, tokenizer, teacher_bytes
         )
         
         if num_valid == 0:
@@ -171,19 +248,27 @@ def compute_srkl_loss(student_logits, teacher_logprobs_list, tokenizer, alpha=0.
         
         if torch.isnan(kl) or torch.isinf(kl):
             continue
-            
+        
         loss += kl
         valid_tokens += 1
     
     if debug and valid_tokens == 0:
-        print(f"[DEBUG SRKL] total_teacher_tokens={total_teacher_tokens}, total_filtered_tokens={total_filtered_tokens}, valid_tokens={valid_tokens}")
+        print(f"[DEBUG SRKL] total_teacher_tokens={total_teacher_tokens}, "
+              f"total_filtered_tokens={total_filtered_tokens}, valid_tokens={valid_tokens}")
     
     if valid_tokens == 0:
         return torch.tensor(0.0, device=student_logits.device, requires_grad=True)
     return loss / valid_tokens
 
 
-def compute_alpha_curriculum(p_prob, q_prob, alpha0=0.1, clip_min=0.01, clip_max=0.1, eps=1e-8):
+def compute_alpha_curriculum(
+    p_prob: float,
+    q_prob: float,
+    alpha0: float = 0.1,
+    clip_min: float = 0.01,
+    clip_max: float = 0.1,
+    eps: float = 1e-8
+) -> float:
     """
     Curriculum update for alpha based on the difference between teacher and student probabilities.
     """
@@ -195,9 +280,14 @@ def compute_alpha_curriculum(p_prob, q_prob, alpha0=0.1, clip_min=0.01, clip_max
     return alpha
 
 
-def get_beta(epoch, total_epochs, beta_max=1.0, beta_min=0.0):
+def get_beta(
+    epoch: int,
+    total_epochs: int,
+    beta_max: float = 1.0,
+    beta_min: float = 0.0
+) -> float:
     """Linear schedule for beta over epochs."""
     if total_epochs <= 1:
         return beta_max
-    progress = epoch / (total_epochs - 1)  # чтобы на последней эпохе было beta_max
+    progress = epoch / (total_epochs - 1)
     return beta_min + progress * (beta_max - beta_min)
