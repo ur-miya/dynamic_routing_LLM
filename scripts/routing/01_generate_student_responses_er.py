@@ -280,15 +280,23 @@ def main():
     #    device_map=args.device if args.device != "cpu" else "cpu",
     #)
 
+    #base_model = AutoModelForCausalLM.from_pretrained(
+    #"Qwen/Qwen2.5-1.5B-Instruct",
+    #dtype=torch.float16,       
+    #device_map=args.device if args.device != "cpu" else "cpu",
+    #)
+
     base_model = AutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen2.5-1.5B-Instruct",
-    dtype=torch.float16,       
+    torch_dtype=torch.float16, 
     device_map=args.device if args.device != "cpu" else "cpu",
-)
+    )
+
 
     #print(f"Loading LoRA from {args.lora_path}...")
     #model = PeftModel.from_pretrained(base_model, args.lora_path)
-    model = base_model
+    #model = base_model
+    model = PeftModel.from_pretrained(base_model, args.lora_path)
     model.eval()
     print("Model loaded.")
 

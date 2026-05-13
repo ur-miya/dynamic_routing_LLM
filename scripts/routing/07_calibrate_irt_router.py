@@ -45,6 +45,12 @@ def main():
     )
     parser.add_argument('--val_split', type=float, default=0.2)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument(
+        '--target_teacher_rate',
+        type=float,
+        default=None,
+        help='If set, choose threshold so teacher_call_rate ≈ this value on validation.'
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.features_csv):
@@ -76,14 +82,19 @@ def main():
         auc = 0.0
         print(f"[WARNING] AUROC failed: {e}")
 
-    # Youden's J threshold
-    fpr, tpr, thresholds = roc_curve(labels, difficulty)
-    j_stat   = tpr - fpr
-    best_idx = np.argmax(j_stat)
-    opt_threshold = float(thresholds[best_idx])
+    if args.target_teacher_rate is not None:
+        selection_mode = f"target_teacher_rate={args.target_teacher_rate}"
+        opt_threshold = float(np.quantile(difficulty, 1.0 - args.target_teacher_rate))
+    else:
+        selection_mode = "youden_j"
+        fpr, tpr, thresholds = roc_curve(labels, difficulty)
+        j_stat = tpr - fpr
+        best_idx = np.argmax(j_stat)
+        opt_threshold = float(thresholds[best_idx])
 
     preds = (difficulty >= opt_threshold).astype(int)
-    f1    = f1_score(labels, preds, average="binary", zero_division=0)
+    val_tcr = float(preds.mean())
+    f1 = f1_score(labels, preds, average="binary", zero_division=0)
 
     print(f"\n=== IRT Router (Approach C) ===")
     print(f"  AUROC:             {auc:.4f}")
@@ -93,6 +104,7 @@ def main():
     print(classification_report(labels, preds, target_names=["student", "teacher"]))
 
     # Scatter plot: irt_difficulty vs binary_label
+    """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     ax = axes[0]
@@ -120,6 +132,7 @@ def main():
     plt.savefig(plot_path, dpi=150)
     plt.close()
     print(f"\nPlot saved to {plot_path}")
+    """
 
     # Корреляция difficulty с метриками качества
     print(f"\nCorrelation irt_difficulty with quality metrics:")
@@ -134,6 +147,9 @@ def main():
         "auroc": auc,
         "f1": f1,
         "calibration_set_size": len(df_cal),
+        "selection_mode": selection_mode,
+        "target_teacher_rate": args.target_teacher_rate,
+        "val_teacher_call_rate": val_tcr,
     }
     config_path = os.path.join(args.output_dir, "router_irt_config.csv")
     pd.DataFrame([config]).to_csv(config_path, index=False)

@@ -34,16 +34,15 @@ import numpy as np
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
-from peft import PeftModel
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, classification_report
 )
 from transformers import (
-    AutoModelForCausalLM, AutoTokenizer,
+    AutoTokenizer,
     AutoModelForSequenceClassification,
 )
-from tqdm import tqdm
 import evaluate
+import joblib
 
 
 # ──────────────────────────────────────────────
@@ -112,6 +111,8 @@ def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_si
                 nlls.append(-log_probs[tid].item())
             uq = {
                 "mean_token_entropy": float(np.mean(entropies)) if entropies else 0.0,
+                "max_token_entropy": float(np.max(entropies)) if entropies else 0.0,
+                "first_token_entropy": float(entropies[0]) if entropies else 0.0,
                 "seq_nll": float(np.mean(nlls)) if nlls else 0.0,
             }
             uq_list.append(uq)
@@ -156,14 +157,38 @@ class ClassifierRouter:
 
 
 class UncertaintyRouter:
-    """Подход B: Uncertainty-based routing по UQ-сигналу."""
-    def __init__(self, signal, threshold):
-        self.signal = signal
+    """Подход B: Learned uncertainty router на UQ-фичах."""
+    def __init__(self, model_path, threshold, feature_names):
+        bundle = joblib.load(model_path)
+        self.model = bundle["model"]
+        self.scaler = bundle["scaler"]
+        self.feature_names = feature_names
         self.threshold = float(threshold)
 
     def route(self, uq_list):
-        scores = np.array([uq.get(self.signal, 0.0) for uq in uq_list])
-        return (scores >= self.threshold).astype(int), scores
+        X = []
+        for uq in uq_list:
+            row = []
+            for f in self.feature_names:
+                v = uq.get(f, 0.0)
+                try:
+                    v = float(v)
+                except Exception:
+                    v = 0.0
+                if np.isnan(v) or np.isinf(v):
+                    v = 0.0
+                row.append(v)
+            X.append(row)
+
+        X = np.array(X, dtype=np.float32)
+
+        if np.isnan(X).any():
+            print("[WARNING] Router B: found NaNs in test UQ features, replacing with 0.0")
+
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        Xs = self.scaler.transform(X)
+        probs = self.model.predict_proba(Xs)[:, 1]
+        return (probs >= self.threshold).astype(int), probs
 
 
 class IRTRouter:
@@ -182,6 +207,32 @@ class IRTRouter:
         ])
         return (diffs >= self.threshold).astype(int), diffs
 
+class HybridRouter:
+    """Подход D: Hybrid router на признаках A + B + C."""
+    def __init__(self, model_path, threshold):
+        bundle = joblib.load(model_path)
+        self.model = bundle["model"]
+        self.scaler = bundle.get("scaler", None)
+        self.feature_names = bundle["feature_names"]
+        self.threshold = float(threshold)
+
+    def route(self, feature_frame: pd.DataFrame):
+        X = feature_frame[self.feature_names].copy()
+        X = X.replace([np.inf, -np.inf], np.nan)
+
+        for c in self.feature_names:
+            med = pd.to_numeric(X[c], errors="coerce").median()
+            if pd.isna(med):
+                med = 0.0
+            X[c] = pd.to_numeric(X[c], errors="coerce").fillna(med)
+
+        X = X.values.astype(np.float32)
+        if self.scaler is not None:
+            X = self.scaler.transform(X)
+
+        scores = self.model.predict_proba(X)[:, 1]
+        decisions = (scores >= self.threshold).astype(int)
+        return decisions, scores
 
 # ──────────────────────────────────────────────
 # Главная функция
@@ -202,7 +253,7 @@ def main():
         '--student_responses_csv', type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            'outputs/evaluation/distilled_detailed_5k.csv'
+            'outputs/evaluation/distilled_distillm2_new/distilled_detailed_test.csv'
         ),
         help='Already generated student responses on test (from 03_evaluate_distilled.py). '
              'If provided, skips re-generation.'
@@ -211,7 +262,7 @@ def main():
         '--lora_path', type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            'outputs/distillm2_model_5k/'
+            'outputs/distilled_distillm2_new/'
         ),
         help='LoRA adapter path (used only if student_responses_csv not found)'
     )
@@ -219,7 +270,7 @@ def main():
         '--routing_dir', type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            'outputs/routing'
+            'outputs/routing_distilled'
         ),
         help='Directory with router configs'
     )
@@ -227,7 +278,7 @@ def main():
         '--output_dir', type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            'outputs/routing'
+            'outputs/routing_distilled'
         ),
     )
     parser.add_argument(
@@ -237,6 +288,26 @@ def main():
     )
     parser.add_argument('--max_samples', type=int, default=500)
     parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--rouge_threshold', type=float, default=0.177)
+    parser.add_argument(
+        '--label_mode', type=str, default='rouge_only',
+        choices=['rouge_only', 'rouge_or_bert']
+    )
+    parser.add_argument('--bert_threshold', type=float, default=0.82)
+    parser.add_argument('--max_new_tokens', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument(
+        '--clf_threshold_override',
+        type=float,
+        default=None,
+        help='If set, overrides classifier threshold at evaluation time.'
+    )
+    parser.add_argument(
+        '--uq_threshold_override',
+        type=float,
+        default=None,
+        help='If set, overrides uncertainty-router threshold at evaluation time.'
+    )
     args = parser.parse_args()
 
     torch.cuda.empty_cache()
@@ -318,11 +389,11 @@ def main():
                 "seq_nll":             float(row["seq_nll"]),
             })
         # ответы берём из df_stu
-        student_responses = df_stu["student_response"].tolist()
+        response_col = "distilled_response" if "distilled_response" in df_stu.columns else "student_response"
+        student_responses = df_stu[response_col].tolist()
 
     # ── Бинарные метки (ground truth) ──
     rouge_metric = evaluate.load("rouge")
-    bertscore_metric = evaluate.load("bertscore")
 
     print("Computing quality metrics on test set...")
     rouge_ps = rouge_metric.compute(
@@ -339,22 +410,28 @@ def main():
     print(f"Test UQ features saved → {os.path.join(args.output_dir, 'test_uq.csv')}")
     # конец отладки
 
-    bertscore_res = bertscore_metric.compute(
-        predictions=student_responses,
-        references=references,
-        lang="en",
-        model_type="roberta-large",
-        device=args.device,
-    )
+    if args.label_mode == "rouge_only":
+        gt_labels = (np.array(rouge_ps["rouge1"]) < args.rouge_threshold).astype(int)
 
-    F1 = np.array(bertscore_res["f1"], dtype=np.float32)
-    torch.cuda.empty_cache()
+    elif args.label_mode == "rouge_or_bert":
+        bertscore_metric = evaluate.load("bertscore")
+        bertscore_res = bertscore_metric.compute(
+            predictions=student_responses,
+            references=references,
+            lang="en",
+            model_type="roberta-large",
+            device=args.device,
+        )
+        bert_f1 = np.array(bertscore_res["f1"], dtype=np.float32)
+        torch.cuda.empty_cache()
 
-    gt_labels = (
-        (np.array(rouge_ps["rouge1"]) < 0.15) |
-        (F1 < 0.82)
-    ).astype(int)
-    print(f"Ground truth labels: {gt_labels.sum()} needs teacher / {(1 - gt_labels).sum()} student OK")
+        gt_labels = (
+            (np.array(rouge_ps["rouge1"]) < args.rouge_threshold) |
+            (bert_f1 < args.bert_threshold)
+        ).astype(int)
+
+    else:
+        raise ValueError(f"Unknown label_mode: {args.label_mode}")
 
     # ── Инициализация роутеров ──
     routers = {}
@@ -368,6 +445,12 @@ def main():
         sel_mode = clf_cfg.get("selection_mode", "unknown")
         target_tcr = clf_cfg.get("target_teacher_rate", None)
         val_tcr = clf_cfg.get("val_teacher_call_rate", None)
+
+        if args.clf_threshold_override is not None:
+            print(f"[INFO] Overriding classifier threshold: "
+                f"{clf_thresh:.4f} -> {args.clf_threshold_override:.4f}")
+            clf_thresh = float(args.clf_threshold_override)
+
         routers["A_Classifier"] = ClassifierRouter(
             clf_model_dir, clf_model_dir, clf_thresh, args.device
         )
@@ -379,22 +462,41 @@ def main():
     else:
         print(f"[WARNING] Router A not found at {clf_model_dir} or threshold CSV missing")
 
-    # Подход B: Uncertainty
+    # Подход B: Uncertainty (learned LR on UQ features)
     uq_config_csv = os.path.join(args.routing_dir, "router_uncertainty_config.csv")
     if os.path.exists(uq_config_csv):
         uq_cfg = pd.read_csv(uq_config_csv).iloc[0]
-        best_signal = uq_cfg["best_signal"]
         uq_thresh = float(uq_cfg["threshold"])
+        if args.uq_threshold_override is not None:
+            print(f"[INFO] Overriding Router B threshold: "
+                f"{uq_thresh:.4f} -> {args.uq_threshold_override:.4f}")
+            uq_thresh = float(args.uq_threshold_override)
         sel_mode_b = uq_cfg.get("selection_mode", "unknown")
         target_tcr_b = uq_cfg.get("target_teacher_rate", None)
         val_tcr_b = uq_cfg.get("val_teacher_call_rate", None)
+        model_path_b = uq_cfg.get("model_path", "router_uncertainty_lr.joblib")
+
+        if os.path.isabs(model_path_b):
+            resolved_model_path_b = model_path_b
+        elif os.path.exists(model_path_b):
+            resolved_model_path_b = os.path.abspath(model_path_b)
+        else:
+            resolved_model_path_b = os.path.abspath(os.path.join(args.routing_dir, model_path_b))
+
+        model_path_b = resolved_model_path_b
+        feature_names_raw = uq_cfg.get("feature_names", uq_cfg.get("features", "mean_token_entropy|max_token_entropy|first_token_entropy|seq_nll"))
+        feature_names_b = str(feature_names_raw).split("|")
+
         routers["B_Uncertainty"] = UncertaintyRouter(
-            signal=best_signal,
+            model_path=model_path_b,
             threshold=uq_thresh,
+            feature_names=feature_names_b,
         )
+
         print(
-            f"Router B loaded (signal={best_signal}, threshold={uq_thresh:.4f}, "
-            f"selection_mode={sel_mode_b}, target_TCR={target_tcr_b}, val_TCR={val_tcr_b})"
+            f"Router B loaded (LR-on-UQ, threshold={uq_thresh:.4f}, "
+            f"features={feature_names_b}, selection_mode={sel_mode_b}, "
+            f"target_TCR={target_tcr_b}, val_TCR={val_tcr_b})"
         )
     else:
         print(f"[WARNING] Router B config not found at {uq_config_csv}")
@@ -420,9 +522,79 @@ def main():
         print("Error: no routers available. Run scripts 05-07 first.")
         return
 
+    hybrid_config_csv = os.path.join(args.routing_dir, "router_hybrid_config.csv")
+
+    if os.path.exists(hybrid_config_csv):
+        hybrid_cfg = pd.read_csv(hybrid_config_csv).iloc[0]
+
+        hybrid_model_path = hybrid_cfg.get("model_path", "router_hybrid.joblib")
+
+        if os.path.isabs(hybrid_model_path):
+            resolved_hybrid_model_path = hybrid_model_path
+        elif os.path.exists(hybrid_model_path):
+            resolved_hybrid_model_path = os.path.abspath(hybrid_model_path)
+        else:
+            resolved_hybrid_model_path = os.path.abspath(
+                os.path.join(args.routing_dir, hybrid_model_path)
+            )
+
+        hybrid_model_path = resolved_hybrid_model_path
+
+        if not os.path.exists(hybrid_model_path):
+            raise FileNotFoundError(f"Hybrid model not found: {hybrid_model_path}")
+
+        hybrid_thresh = float(hybrid_cfg["threshold"])
+        sel_mode_d = hybrid_cfg.get("selection_mode", "unknown")
+        target_tcr_d = hybrid_cfg.get("target_teacher_rate", None)
+        val_tcr_d = hybrid_cfg.get("val_teacher_call_rate", None)
+
+        routers["D_Hybrid"] = HybridRouter(
+            model_path=hybrid_model_path,
+            threshold=hybrid_thresh,
+        )
+
+        print(
+            f"Router D loaded (threshold={hybrid_thresh:.4f}, "
+            f"selection_mode={sel_mode_d}, target_TCR={target_tcr_d}, "
+            f"val_TCR={val_tcr_d})"
+        )
+    else:
+        print(f"[INFO] Router D config not found at {hybrid_config_csv}")
+
     # ── Оценка каждого роутера ──
     results = []
     teacher_responses = references  # gold reply как "учитель"
+
+    hybrid_feature_frame = None
+
+    if "D_Hybrid" in routers:
+        if "A_Classifier" not in routers:
+            raise ValueError("Hybrid router requires Router A to compute score_A on test.")
+        if "B_Uncertainty" not in routers:
+            raise ValueError("Hybrid router requires Router B to compute score_B on test.")
+        if "C_IRT" not in routers:
+            raise ValueError("Hybrid router requires Router C to compute score_C on test.")
+
+        # score_A
+        _, score_A = routers["A_Classifier"].route(prompts)
+
+        # score_B
+        _, score_B = routers["B_Uncertainty"].route(uq_list)
+
+        # score_C
+        _, score_C = routers["C_IRT"].route(prompts)
+
+        hybrid_feature_frame = pd.DataFrame({
+            "score_A": score_A,
+            "score_B": score_B,
+            "score_C": score_C,
+        })
+
+        hybrid_feature_frame.to_csv(
+            os.path.join(args.output_dir, "test_hybrid_features.csv"),
+            index=False
+        )
+        print(f"Hybrid test features saved → {os.path.join(args.output_dir, 'test_hybrid_features.csv')}")
 
     for name, router in routers.items():
         print(f"\n=== Evaluating Router {name} ===")
@@ -434,6 +606,8 @@ def main():
             decisions, scores = router.route(uq_list)
         elif name == "C_IRT":
             decisions, scores = router.route(prompts)
+        elif name == "D_Hybrid":
+            decisions, scores = router.route(hybrid_feature_frame)
         else:
             continue
 
@@ -522,11 +696,18 @@ def main():
             ("teacher_call_rate_pct", "Teacher Call Rate (%)"),
             ("rouge1_blended", "ROUGE-1 Blended"),
         ]
-        colors = ["steelblue", "darkorange", "purple"]
+
+        color_map = {
+            "A_Classifier": "steelblue",
+            "B_Uncertainty": "darkorange",
+            "C_IRT": "purple",
+            "D_Hybrid": "seagreen",
+        }
+        bar_colors = [color_map.get(r, "gray") for r in df_plot["router"].values]
+        
         for ax, (metric, title) in zip(axes, metrics_plot):
             vals = df_plot[metric].values
-            bars = ax.bar(df_plot["router"].values, vals,
-                          color=colors[:len(df_plot)])
+            bars = ax.bar(df_plot["router"].values, vals, color=bar_colors)
             for bar, val in zip(bars, vals):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,

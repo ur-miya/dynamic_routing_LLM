@@ -32,13 +32,14 @@ import numpy as np
 import pandas as pd
 
 try:
-    from py_irt.training import IRTModelTrainer
+    from py_irt.training import IrtModelTrainer
     from py_irt.config import IrtConfig
     HAS_PYIRT = True
 except ImportError:
     HAS_PYIRT = False
     print("[WARNING] py-irt not installed. Run: pip install py-irt")
     print("          IRT difficulty will be estimated with a simple proxy.")
+from pathlib import Path
 
 
 # ──────────────────────────────────────────────
@@ -66,51 +67,40 @@ def proxy_irt_difficulty(df: pd.DataFrame, correctness_col: str = "binary_label"
 # ──────────────────────────────────────────────
 
 def run_irt(response_records: list, output_dir: str) -> dict:
-    """
-    Запускает 1PL IRT модель на матрице ответов.
+    from pathlib import Path
 
-    Args:
-        response_records: list[dict] — каждый элемент:
-            {"subject_id": str, "item_id": str, "response": int (0 or 1)}
-        output_dir: куда сохранить временные файлы py-irt
+    # Преобразуем список записей в формат py-irt:
+    # {"subject_id": "...", "responses": {"item_id": response, ...}}
+    subject_responses = {}
+    for rec in response_records:
+        sid = rec["subject_id"]
+        iid = rec["item_id"]
+        if sid not in subject_responses:
+            subject_responses[sid] = {}
+        subject_responses[sid][iid] = rec["response"]
 
-    Returns:
-        dict: item_id -> difficulty (float)
-    """
-    # Сохраняем данные во временный JSONL (формат py-irt)
     tmp_path = os.path.join(output_dir, "irt_input.jsonl")
     with open(tmp_path, "w") as f:
-        for rec in response_records:
-            f.write(json.dumps(rec) + "\n")
+        for sid, responses in subject_responses.items():
+            f.write(json.dumps({"subject_id": sid, "responses": responses}) + "\n")
 
-    print(f"IRT input saved to {tmp_path} ({len(response_records)} records)")
+    print(f"IRT input saved to {tmp_path} ({len(subject_responses)} subjects)")
     print(f"Running 1PL IRT model...")
 
-    config = IrtConfig(
-        model_type="1pl",
-        epochs=500,
-        log_every=100,
-    )
-    trainer = IRTModelTrainer(config=config)
-    trainer.train(tmp_path)
+    try:
+        config = IrtConfig(model_type="1pl", epochs=500, log_every=100)
+    except TypeError:
+        config = IrtConfig(model_type="1pl", epochs=500)
 
-    # Извлекаем параметры сложности
-    item_params = trainer.irt_model.item_params
-    difficulties = {}
-    if hasattr(item_params, "to_dict"):
-        item_params = item_params.to_dict("records")
+    trainer = IrtModelTrainer(data_path=Path(tmp_path), config=config)
+    trainer.train()
 
-    if isinstance(item_params, list):
-        for rec in item_params:
-            item_id = rec.get("item_id", rec.get("item", ""))
-            diff = rec.get("difficulty", rec.get("diff", rec.get("b", 0.0)))
-            difficulties[item_id] = float(diff)
-    elif isinstance(item_params, dict):
-        for item_id, params in item_params.items():
-            diff = params.get("difficulty", params.get("b", 0.0)) \
-                   if isinstance(params, dict) else float(params)
-            difficulties[item_id] = float(diff)
+    # Извлекаем difficulties из best_params
+    bp = trainer.best_params
+    item_ids_map = bp["item_ids"]   # {0: 'i1', 1: 'i2', ...}
+    diffs = bp["diff"]              # [float, float, ...]
 
+    difficulties = {item_ids_map[i]: float(diffs[i]) for i in range(len(diffs))}
     print(f"IRT fitted. Items with difficulty: {len(difficulties)}")
     return difficulties
 
@@ -199,10 +189,7 @@ def main():
                     base_row = base_row.iloc[0]
                 r1  = base_row.get("rouge1", 0.0)
                 bfs = base_row.get("bert_f1", 1.0)
-                base_label = int(
-                    (float(r1) < args.rouge_threshold) or
-                    (float(bfs) < args.bert_threshold)
-                )
+                base_label = int(float(r1) < args.rouge_threshold)
                 response_records.append({
                     "subject_id": "baseline_student",
                     "item_id":    row["item_id"],
