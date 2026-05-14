@@ -1,24 +1,4 @@
-#!/usr/bin/env python3
-# scripts/routing/02_compute_features_er.py
-"""
-Вычисляет все признаки для датасета train_er на основе student_responses_er.csv:
-  - Метрики качества:  rouge1, rouge2, rougeL, bert_f1
-  - Бинарная метка:    binary_label (0 = студент справился, 1 = нужен учитель)
-  - Признаки промпта:  prompt_length, prompt_ttr, prompt_readability
-  - Эмбеддинги:        prompt_embedding (сохраняются в .npy)
 
-Результат:
-  outputs/routing/features_er.csv
-  outputs/routing/prompt_embeddings_er.npy
-
-Запуск:
-    python scripts/routing/02_compute_features_er.py \
-        --input_csv outputs/routing/student_responses_er.csv \
-        --output_dir outputs/routing \
-        --rouge_threshold 0.15 \
-        --bert_threshold 0.82 \
-        --device cuda:0
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -32,7 +12,6 @@ import torch
 import evaluate
 from tqdm import tqdm
 
-# Опциональные зависимости (устанавливаются при необходимости)
 try:
     from sentence_transformers import SentenceTransformer
     HAS_SBERT = True
@@ -40,39 +19,23 @@ except ImportError:
     HAS_SBERT = False
     print("[WARNING] sentence-transformers not installed. Embeddings will be skipped.")
 
-
-# ──────────────────────────────────────────────
-# Вспомогательные функции
-# ──────────────────────────────────────────────
-
 def compute_prompt_features(prompt: str) -> dict:
-    """
-    Вычисляет лингвистические характеристики промпта.
-
-    Returns:
-        dict с полями: prompt_length, prompt_ttr, prompt_readability
-    """
-    # Количество токенов (приблизительно по словам)
     words = prompt.split()
     prompt_length = len(words)
 
-    # Type-Token Ratio (лексическое разнообразие)
     unique_words = set(w.lower() for w in words)
     prompt_ttr = len(unique_words) / max(len(words), 1)
 
-    # Readability: упрощённый Flesch-Kincaid Grade Level
-    # FK = 0.39 * (words/sentences) + 11.8 * (syllables/words) - 15.59
     sentences = re.split(r'[.!?]+', prompt)
     sentences = [s.strip() for s in sentences if s.strip()]
     num_sentences = max(len(sentences), 1)
 
-    # Подсчёт слогов (приближение: 1 слог на 3 символа)
     num_syllables = sum(max(1, len(w) // 3) for w in words)
 
-    asl = prompt_length / num_sentences          # avg sentence length
-    asw = num_syllables / max(prompt_length, 1)  # avg syllables per word
+    asl = prompt_length / num_sentences          
+    asw = num_syllables / max(prompt_length, 1) 
     fk_grade = 0.39 * asl + 11.8 * asw - 15.59
-    fk_grade = max(0.0, fk_grade)                # не ниже нуля
+    fk_grade = max(0.0, fk_grade)                
 
     return {
         "prompt_length": prompt_length,
@@ -80,10 +43,6 @@ def compute_prompt_features(prompt: str) -> dict:
         "prompt_readability": round(fk_grade, 4),
     }
 
-
-# ──────────────────────────────────────────────
-# Главная функция
-# ──────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -125,7 +84,6 @@ def main():
         return
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Загрузка данных ──
     print(f"Loading {args.input_csv}")
     df = pd.read_csv(args.input_csv)
     if args.max_samples:
@@ -133,21 +91,16 @@ def main():
         print(f"Limiting to {args.max_samples} samples")
     print(f"Total samples: {len(df)}")
 
-    # Проверяем, что нужные колонки есть
     required_cols = ["prompt", "reply", "student_response"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in {args.input_csv}: {missing}")
 
-    # Приводим текстовые поля к строкам и убираем NaN
     for col in ["prompt", "reply", "student_response"]:
         df[col] = df[col].fillna("").astype(str)
 
-    # Простейшая очистка очевидного мусора в student_response
-    # (оставляем как «плохие ответы», но без бесконечных хвостов)
     def clean_student_resp(text: str) -> str:
         t = text.strip()
-        # Если очень короткий "мусор", вроде "ink" или "me" + много \n — считаем пустым
         if t.startswith("ink") and len(t) < 20:
             return ""
         if t.startswith("me") and len(t) < 20:
@@ -156,7 +109,6 @@ def main():
 
     df["student_response"] = df["student_response"].apply(clean_student_resp)
 
-    # Удаляем строки, где reference (reply) пустой — метрики тогда бессмысленны
     before = len(df)
     df = df[df["reply"].str.strip() != ""].copy()
     after = len(df)
@@ -169,7 +121,6 @@ def main():
     predictions = df["student_response"].tolist()
     references  = df["reply"].tolist()
 
-    # ── ROUGE ──
     print("\nComputing ROUGE scores...")
     rouge_metric = evaluate.load("rouge")
     rouge_per_sample = rouge_metric.compute(
@@ -183,7 +134,6 @@ def main():
     print(f"  ROUGE-1: {df['rouge1'].mean():.4f} ± {df['rouge1'].std():.4f}")
     print(f"  ROUGE-L: {df['rougeL'].mean():.4f} ± {df['rougeL'].std():.4f}")
 
-    # ── BERTScore ──
     print("\nComputing BERTScore...")
     bert_ok = True
     try:
@@ -211,8 +161,6 @@ def main():
     if args.device != "cpu":
         torch.cuda.empty_cache()
 
-    # ── Бинарная метка ──
-    # label=1 если rouge1 < порога ИЛИ bert_f1 < порога
     if bert_ok:
         df["binary_label"] = (
             (df["rouge1"] < args.rouge_threshold) |
@@ -228,7 +176,6 @@ def main():
     print(f"  1 (needs teacher): {n_teacher} ({n_teacher/len(df)*100:.1f}%)")
     print(f"  Thresholds: ROUGE-1 < {args.rouge_threshold} OR BERTScore < {args.bert_threshold}")
 
-    # ── Признаки промпта ──
     print("\nComputing prompt features...")
     prompt_feats = [compute_prompt_features(p) for p in tqdm(df["prompt"].tolist(), desc="Prompt features")]
     df_feats = pd.DataFrame(prompt_feats)
@@ -237,7 +184,6 @@ def main():
     print(f"  prompt_ttr:    mean={df['prompt_ttr'].mean():.3f}")
     print(f"  prompt_readability: mean={df['prompt_readability'].mean():.2f}")
 
-    # ── Эмбеддинги промптов ──
     emb_path = os.path.join(args.output_dir, "prompt_embeddings_er.npy")
     if not args.skip_embeddings and HAS_SBERT:
         print(f"\nComputing prompt embeddings ({args.embed_model})...")
@@ -258,30 +204,22 @@ def main():
     else:
         print("\nSkipping embeddings (sentence-transformers not installed)")
 
-    # ── Сохраняем итоговый CSV ──
     output_csv = os.path.join(args.output_dir, "features_er.csv")
 
-    # Колонки для сохранения (без тяжёлых бинарных данных)
     save_cols = [
         "prompt", "reply", "student_response",
-        # Метрики качества
         "rouge1", "rouge2", "rougeL", "bert_f1",
-        # Метка
         "binary_label",
-        # UQ-метрики (из 01_generate_student_responses_er.py)
         "mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll",
-        # Признаки промпта
         "prompt_length", "prompt_ttr", "prompt_readability",
     ]
-    # Оставляем только существующие колонки
     save_cols = [c for c in save_cols if c in df.columns]
     df[save_cols].to_csv(output_csv, index=False)
     print(f"\nFeatures saved to {output_csv}")
     print(f"Saved columns: {save_cols}")
     print(f"Total rows: {len(df)}")
 
-    # ── Итоговая статистика ──
-    print("\n=== FEATURES SUMMARY ===")
+    print("\nFeatures summary")
     print(f"  Samples total:     {len(df)}")
     print(f"  Label=0 (student): {(df['binary_label']==0).sum()}")
     print(f"  Label=1 (teacher): {(df['binary_label']==1).sum()}")

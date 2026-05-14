@@ -1,11 +1,3 @@
-# scripts/03_evaluate_distilled_v3.py  [FIXED v3]
-#
-# ИЗМЕНЕНИЯ относительно v2:
-#   - output_scores=True + return_dict_in_generate=True для захвата логитов
-#   - Вычисление UQ-сигналов: mean/max/first_token_entropy, seq_nll
-#   - Колонка distilled_response → student_response (совместимость с роутерами)
-#   - Выходной файл: distilled_detailed.csv (без суффикса _5k, имя управляется --output_suffix)
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -114,8 +106,7 @@ def main():
             eos_token_id=tokenizer.eos_token_id,
             use_cache=True,
             num_beams=1,
-            repetition_penalty=1.1,
-            # UQ: захватываем logits на каждом шаге генерации
+            repetition_penalty=1.1,\
             output_scores=True,
             return_dict_in_generate=True,
         )
@@ -125,36 +116,30 @@ def main():
         with torch.no_grad():
             gen_out = model.generate(**generate_kwargs)
 
-        sequences = gen_out.sequences          # [B, input_len + gen_len]
-        scores    = gen_out.scores             # tuple of [B, vocab] per step
+        sequences = gen_out.sequences   
+        scores    = gen_out.scores  
 
-        # --- Декодируем только новые токены ---
         new_tokens = sequences[:, input_len:]
         responses  = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
         responses  = [r.replace("<|im_end|>", "").strip() for r in responses]
 
         B = sequences.shape[0]
 
-        # --- UQ-сигналы из per-step logits ---
-        # scores[t] = logits [B, vocab] на шаге t
-        # new_tokens[:, t] = выбранный токен на шаге t
         mean_ent_list  = [[] for _ in range(B)]
         max_ent_list   = [[] for _ in range(B)]
         first_ent_list = [None] * B
         nll_list       = [[] for _ in range(B)]
 
         for t, step_logits in enumerate(scores):
-            # step_logits: [B, vocab], float16 → float32 для точности
             step_logits = step_logits.float()
-            probs   = F.softmax(step_logits,     dim=-1)   # [B, vocab]
-            log_p   = F.log_softmax(step_logits, dim=-1)   # [B, vocab]
-            entropy = -(probs * log_p).sum(dim=-1)          # [B]
+            probs   = F.softmax(step_logits,     dim=-1) 
+            log_p   = F.log_softmax(step_logits, dim=-1) 
+            entropy = -(probs * log_p).sum(dim=-1)    
 
-            chosen_ids = new_tokens[:, t]                   # [B]
-            # Маскируем PAD-токены (не учитываем в статистике)
+            chosen_ids = new_tokens[:, t]               
             is_pad = (chosen_ids == tokenizer.pad_token_id)
 
-            nll = -log_p.gather(1, chosen_ids.unsqueeze(1)).squeeze(1)  # [B]
+            nll = -log_p.gather(1, chosen_ids.unsqueeze(1)).squeeze(1)  
 
             for b in range(B):
                 if not is_pad[b].item():
@@ -164,7 +149,6 @@ def main():
                     if first_ent_list[b] is None:
                         first_ent_list[b] = entropy[b].item()
 
-        # Агрегация
         mean_entropy  = [sum(v)/len(v) if v else 0.0 for v in mean_ent_list]
         max_entropy   = [max(v)        if v else 0.0 for v in max_ent_list]
         first_entropy = [v if v is not None else 0.0  for v in first_ent_list]
@@ -187,19 +171,17 @@ def main():
         if args.device != 'cpu':
             torch.cuda.empty_cache()
 
-    # --- Имена колонок совместимы с baseline_detailed.csv ---
-    df['student_response']     = all_responses      # было distilled_response
-    df['mean_token_entropy']   = all_mean_ent
-    df['max_token_entropy']    = all_max_ent
-    df['first_token_entropy']  = all_first_ent
-    df['seq_nll']              = all_seq_nll
+    df['student_response'] = all_responses    
+    df['mean_token_entropy'] = all_mean_ent
+    df['max_token_entropy'] = all_max_ent
+    df['first_token_entropy'] = all_first_ent
+    df['seq_nll'] = all_seq_nll
 
     suf = args.output_suffix
     raw_out = os.path.join(args.output_dir, f'distilled_predictions{suf}.csv')
     df.to_csv(raw_out, index=False)
     print(f"Raw predictions saved to {raw_out}")
 
-    # --- Метрики качества ---
     rouge       = evaluate.load('rouge')
     bert_scorer = BERTScorer(lang='en', device=args.device if args.device != 'cpu' else 'cpu')
 
@@ -224,7 +206,6 @@ def main():
     df.to_csv(detailed_out, index=False)
     print(f"Detailed results saved to {detailed_out}")
 
-    # --- Sanity check UQ-сигналов ---
     print("\n[UQ SANITY CHECK]")
     print(f"  mean_token_entropy: mean={df['mean_token_entropy'].mean():.4f}  "
           f"min={df['mean_token_entropy'].min():.4f}  max={df['mean_token_entropy'].max():.4f}")
@@ -233,7 +214,6 @@ def main():
     print(f"  seq_nll:            mean={df['seq_nll'].mean():.4f}  "
           f"min={df['seq_nll'].min():.4f}  max={df['seq_nll'].max():.4f}")
 
-    # --- Summary ---
     model_name = os.path.basename(args.lora_path)
     summary = {
         'model_type':   model_name,
@@ -252,14 +232,14 @@ def main():
         os.path.join(args.output_dir, f'{model_name}_summary{suf}.csv'), index=False
     )
 
-    print("\n=== DISTILLED MODEL SUMMARY ===")
+    print("\nDistilled model summary")
     for k, v in summary.items():
         print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
 
     baseline_summary = os.path.join(args.output_dir, 'baseline_summary.csv')
     if os.path.exists(baseline_summary):
         baseline_df = pd.read_csv(baseline_summary)
-        print("\n=== COMPARISON WITH BASELINE ===")
+        print("\nComparison with baseline")
         print(f"{'Metric':<20} {'Baseline':<12} {'Distilled':<12} {'Change':<12}")
         print("-" * 56)
         for metric in ['rouge1_mean', 'rouge2_mean', 'rougeL_mean', 'bert_f1_mean']:

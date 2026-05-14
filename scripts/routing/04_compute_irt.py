@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/04_compute_irt.py
-"""
-Вычисляет IRT-difficulty (сложность промпта как латентная переменная)
-с помощью 1PL (Rasch model) через библиотеку py-irt.
-
-Матрица ответов строится из двух «испытуемых»:
-  - baseline_student (Qwen2.5-1.5B без LoRA) — берётся из outputs/evaluation/baseline_detailed.csv
-                                                или генерируется на лету
-  - distillm2_student — из features_er.csv (binary_label: 1=ошибка → 0, 0=ок → 1)
-
-Результат:
-  outputs/routing/irt_difficulties_er.csv  (prompt + irt_difficulty)
-  outputs/routing/features_er.csv          (обновлённый, с колонкой irt_difficulty)
-
-Установка: pip install py-irt
-
-Запуск:
-    python scripts/routing/04_compute_irt.py \
-        --features_csv outputs/routing/features_er.csv \
-        --output_dir outputs/routing
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -38,39 +16,18 @@ try:
 except ImportError:
     HAS_PYIRT = False
     print("[WARNING] py-irt not installed. Run: pip install py-irt")
-    print("          IRT difficulty will be estimated with a simple proxy.")
+    print("IRT difficulty will be estimated with a simple proxy.")
 from pathlib import Path
 
-
-# ──────────────────────────────────────────────
-# Простой прокси IRT (если py-irt не установлен)
-# ──────────────────────────────────────────────
-
 def proxy_irt_difficulty(df: pd.DataFrame, correctness_col: str = "binary_label") -> pd.Series:
-    """
-    Простой прокси: сложность промпта ≈ сумма ошибок по всем испытуемым.
-    Чем чаще ошибаются — тем сложнее.
-
-    correctness_col: 0=студент справился (correct), 1=ошибка (incorrect)
-    """
-    # Нормализуем к [0, 1]: 0=лёгкий, 1=сложный
     avg_error_rate = df[correctness_col].astype(float).values
-    # Стандартизируем как z-score (как в IRT)
     mean_val = avg_error_rate.mean()
     std_val  = avg_error_rate.std() + 1e-8
     difficulty = (avg_error_rate - mean_val) / std_val
     return pd.Series(difficulty, index=df.index)
 
-
-# ──────────────────────────────────────────────
-# py-irt интеграция
-# ──────────────────────────────────────────────
-
 def run_irt(response_records: list, output_dir: str) -> dict:
     from pathlib import Path
-
-    # Преобразуем список записей в формат py-irt:
-    # {"subject_id": "...", "responses": {"item_id": response, ...}}
     subject_responses = {}
     for rec in response_records:
         sid = rec["subject_id"]
@@ -95,19 +52,13 @@ def run_irt(response_records: list, output_dir: str) -> dict:
     trainer = IrtModelTrainer(data_path=Path(tmp_path), config=config)
     trainer.train()
 
-    # Извлекаем difficulties из best_params
     bp = trainer.best_params
-    item_ids_map = bp["item_ids"]   # {0: 'i1', 1: 'i2', ...}
-    diffs = bp["diff"]              # [float, float, ...]
+    item_ids_map = bp["item_ids"]   
+    diffs = bp["diff"]             
 
     difficulties = {item_ids_map[i]: float(diffs[i]) for i in range(len(diffs))}
     print(f"IRT fitted. Items with difficulty: {len(difficulties)}")
     return difficulties
-
-
-# ──────────────────────────────────────────────
-# Главная функция
-# ──────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -148,43 +99,38 @@ def main():
         return
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Загрузка features_er ──
     print(f"Loading features_er from {args.features_csv}")
     df_feat = pd.read_csv(args.features_csv)
     print(f"Total samples: {len(df_feat)}")
 
-    # Создаём item_id для каждого промпта
     df_feat["item_id"] = [f"prompt_{i}" for i in range(len(df_feat))]
 
-    # ── Строим матрицу ответов ──
-    # response=1 означает "правильный ответ" (студент справился)
-    # binary_label=0 → student OK → response=1
-    # binary_label=1 → student failed → response=0
+    # response=1 означает "правильный ответ"
+    # binary_label=0 - student OK  - response=1
+    # binary_label=1 - student failed - response=0
 
     response_records = []
 
-    # Испытуемый 1: distillm2_student
+    # 1: distillm2_student
     for _, row in df_feat.iterrows():
         response_records.append({
             "subject_id": "distillm2_student",
             "item_id":    row["item_id"],
-            "response":   1 - int(row["binary_label"]),  # инвертируем: 0→1, 1→0
+            "response":   1 - int(row["binary_label"]),  
         })
 
-    # Испытуемый 2: baseline_student (если есть)
+    # 2: baseline_student
     has_baseline = False
     if os.path.exists(args.baseline_csv):
         print(f"Loading baseline data from {args.baseline_csv}")
         df_base = pd.read_csv(args.baseline_csv)
 
-        # Совмещаем с features_er по промпту
         df_base_indexed = df_base.set_index("prompt")
 
         for _, row in df_feat.iterrows():
             prompt = row["prompt"]
             if prompt in df_base_indexed.index:
                 base_row = df_base_indexed.loc[prompt]
-                # защита от дублирующихся промптов в baseline
                 if isinstance(base_row, pd.DataFrame):
                     base_row = base_row.iloc[0]
                 r1  = base_row.get("rouge1", 0.0)
@@ -199,15 +145,13 @@ def main():
         print(f"Baseline student added as 2nd subject")
     else:
         print(f"[INFO] Baseline CSV not found ({args.baseline_csv}), using single subject")
-        print(f"       IRT will use proxy difficulty (run with 2+ subjects for better estimates)")
+        print(f"IRT will use proxy difficulty (run with 2+ subjects for better estimates)")
 
-    # ── Запускаем IRT ──
     if HAS_PYIRT and has_baseline:
         print(f"\nRunning py-irt (1PL model) on {len(response_records)} records...")
         try:
             difficulties = run_irt(response_records, args.output_dir)
             df_feat["irt_difficulty"] = df_feat["item_id"].map(difficulties)
-            # Если какие-то промпты не попали в словарь — заполняем средним
             mean_diff = df_feat["irt_difficulty"].mean()
             df_feat["irt_difficulty"] = df_feat["irt_difficulty"].fillna(mean_diff)
             print(f"IRT difficulty: mean={df_feat['irt_difficulty'].mean():.4f}, "
@@ -221,18 +165,15 @@ def main():
         print(f"\nUsing proxy IRT difficulty ({reason})")
         df_feat["irt_difficulty"] = proxy_irt_difficulty(df_feat)
 
-    # ── Сохраняем ──
-    # Отдельный файл с IRT
     irt_output = os.path.join(args.output_dir, "irt_difficulties_er.csv")
     df_feat[["item_id", "prompt", "irt_difficulty"]].to_csv(irt_output, index=False)
     print(f"\nIRT difficulties saved to {irt_output}")
 
-    # Обновляем features_er.csv
-    df_feat.drop(columns=["item_id"], inplace=True)  # убираем служебную колонку
+    df_feat.drop(columns=["item_id"], inplace=True)  
     df_feat.to_csv(args.features_csv, index=False)
     print(f"Updated features_er.csv with irt_difficulty column")
 
-    print(f"\n=== IRT DIFFICULTY SUMMARY ===")
+    print(f"\nIRT difficulty summary")
     print(f"  Mean: {df_feat['irt_difficulty'].mean():.4f}")
     print(f"  Std:  {df_feat['irt_difficulty'].std():.4f}")
     print(f"  Min:  {df_feat['irt_difficulty'].min():.4f}")

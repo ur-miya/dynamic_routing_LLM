@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-# scripts/04_generate_sgo_logprobs.py  [FIXED]
-#
-# ИСПРАВЛЕН БАГ #4:
-#   Старый код использовал /v1/chat/completions с параметром echo=True и max_tokens=1.
-#   Параметр echo не поддерживается в chat completions — API его игнорировало и
-#   возвращало logprobs только для 1 сгенерированного токена (<think>).
-#   В итоге teacher_logprobs_sgo имел длину = 1 вместо len(student_response).
-#
-#   Фикс: используем /v1/completions (legacy) с echo=True и max_tokens=0.
-#   Это возвращает logprobs для всего переданного текста (промпт + ответ студента).
-#   Затем вырезаем только часть, соответствующую ответу студента (пропускаем промпт).
-#
-#   Формат ответа completions API конвертируется в формат chat completions
-#   (list of dicts с ключами token/logprob/bytes/top_logprobs), который ожидают
-#   функции потерь soft_kd_loss и compute_skl_loss/compute_srkl_loss.
-#
-# ДОПОЛНИТЕЛЬНО:
-#   Добавлен флаг --no_think (по умолчанию True) для консистентности с TGO.
-#   Добавлен аргумент --completions_url для явного задания эндпоинта.
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,31 +20,12 @@ STUDENT_MODEL = os.getenv("STUDENT_MODEL_NAME", "")
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
-# ---------------------------------------------------------------------------
-# Конвертер формата completions → chat completions
-# ---------------------------------------------------------------------------
 def completions_logprobs_to_chat_format(logprobs_data: dict, prompt_token_count: int) -> list:
-    """
-    Конвертирует logprobs из /v1/completions (с echo=True) в формат,
-    ожидаемый функциями потерь дистилляции:
-      [{"token": str, "logprob": float, "bytes": List[int],
-        "top_logprobs": [{"token": str, "logprob": float, "bytes": List[int]}, ...]}, ...]
 
-    Параметры
-    ----------
-    logprobs_data : dict
-        Объект logprobs из choices[0].logprobs (completions API).
-        Ожидаемые ключи: "tokens", "token_logprobs", "top_logprobs".
-    prompt_token_count : int
-        Количество токенов в промпте (prompt + шаблон до ответа).
-        Позиции [0 .. prompt_token_count-1] пропускаются.
-    """
     tokens       = logprobs_data.get("tokens", [])
     token_logprobs = logprobs_data.get("token_logprobs", [])
     top_logprobs   = logprobs_data.get("top_logprobs", [])
 
-    # Оставляем только часть, соответствующую ответу студента
     resp_tokens = tokens[prompt_token_count:]
     resp_lp     = token_logprobs[prompt_token_count:]
     resp_top    = top_logprobs[prompt_token_count:]
@@ -86,7 +46,6 @@ def completions_logprobs_to_chat_format(logprobs_data: dict, prompt_token_count:
             "top_logprobs": [],
         }
 
-        # top может быть dict {token_str: logprob} или None
         if isinstance(top, dict):
             for top_tok, top_lp in top.items():
                 try:
@@ -99,7 +58,6 @@ def completions_logprobs_to_chat_format(logprobs_data: dict, prompt_token_count:
                     "bytes":   top_bytes,
                 })
         elif isinstance(top, list):
-            # некоторые реализации возвращают list of dicts
             for item in top:
                 if isinstance(item, dict):
                     top_tok = item.get("token", "")
@@ -118,9 +76,6 @@ def completions_logprobs_to_chat_format(logprobs_data: dict, prompt_token_count:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Основная функция запроса к учителю
-# ---------------------------------------------------------------------------
 def get_sgo_logprobs_via_completions(
     completions_url: str,
     headers: dict,
@@ -132,15 +87,8 @@ def get_sgo_logprobs_via_completions(
     no_think: bool = True,
     timeout: int = 60,
 ) -> list:
-    """
-    Получает teacher logprobs для student_response через /v1/completions с echo=True.
 
-    Возвращает список в chat-completions формате (см. completions_logprobs_to_chat_format).
-    При ошибке возвращает [].
-    """
-    # Формат должен совпадать с форматом, использованным при генерации TGO
     if no_think:
-        # Добавляем /no_think так же, как TeacherModel при генерации TGO
         prompt_part = (
             f"<|im_start|>user\n{prompt} /no_think<|im_end|>\n"
             f"<|im_start|>assistant\n"
@@ -153,16 +101,15 @@ def get_sgo_logprobs_via_completions(
 
     full_text = f"{prompt_part}{student_response}<|im_end|>"
 
-    # Токенизируем промпт для вычисления оффсета
     prompt_tokens = tokenizer(prompt_part)["input_ids"]
     prompt_token_count = len(prompt_tokens)
 
     payload = {
         "model":    model_name,
         "prompt":   full_text,
-        "logprobs": top_logprobs_n,   # кол-во top-k логпробов на позицию
-        "max_tokens": 0,              # FIX: не генерируем, только оцениваем
-        "echo":       True,           # FIX: возвращаем logprobs для входных токенов
+        "logprobs": top_logprobs_n,  
+        "max_tokens": 0,           
+        "echo": True,
         "temperature": 1.0,
     }
 
@@ -201,12 +148,10 @@ def process_single(task_args):
     if delay > 0:
         time.sleep(delay)
     try:
-        # 1. Генерируем ответ студента (baseline)
         student_response = student_model.generate([prompt], **gen_kwargs)[0]
         if not student_response:
             return idx, None, None, False
 
-        # 2. Получаем teacher logprobs для ответа студента через completions API
         logprobs = get_sgo_logprobs_via_completions(
             completions_url=COMPLETIONS_URL,
             headers=headers,
@@ -239,33 +184,23 @@ def main():
     parser.add_argument("--top_logprobs", type=int, default=10)
     parser.add_argument("--request_delay", type=float, default=0.1)
 
-    # FIX: no_think для консистентности с TGO
     parser.add_argument("--no_think", action="store_true", default=True,
                         help="Использовать /no_think формат (должно совпадать с TGO генерацией)")
     args = parser.parse_args()
-
-    #if not args.completions_url:
-    #    raise ValueError(
-    #       "--completions_url не задан и TEACHER_API_PATH не установлен. "
-    #        "Пример: --completions_url http://localhost:8000/v1/completions"
-    #    )
 
     headers = {
         "Authorization": f"Bearer {TEACHER_TOKEN}",
         "Content-Type":  "application/json",
     }
 
-    # Загружаем промпты
     df = pd.read_csv(args.input_file).head(args.max_samples)
     prompts = df["prompt"].tolist()
     print(f"Loaded {len(prompts)} prompts")
     print(f"Completions URL: {COMPLETIONS_URL}")
     print(f"no_think: {args.no_think}")
 
-    # Токенизатор студента (для вычисления prompt_token_count)
     tokenizer = AutoTokenizer.from_pretrained(STUDENT_MODEL, trust_remote_code=True)
 
-    # Импортируем StudentModel здесь, чтобы не ломать модуль без GPU
     from models.student import StudentModel
     student_model = StudentModel(device="cuda")
 
@@ -302,7 +237,6 @@ def main():
         print(f"[WARNING] {zero_logprobs_count} entries have empty logprobs — "
               f"проверь --completions_url и формат ответа API.")
 
-    # Проверяем первый результат
     for i, (sr, lp) in enumerate(results):
         if sr is not None and lp is not None:
             print(f"\n[SANITY CHECK] Sample {i}:")
@@ -312,7 +246,6 @@ def main():
                 print(f"  first entry token: {lp[0].get('token', '?')!r}")
             break
 
-    # Сохраняем в JSONL
     os.makedirs(args.output_dir, exist_ok=True)
     out_file = os.path.join(args.output_dir, "sgo_logprobs_full.jsonl")
     with open(out_file, "w", encoding="utf-8") as f:

@@ -1,29 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/07b_train_hybrid_router.py
-"""
-Подход D: Hybrid Router (A + B + C).
-Обучает мета-классификатор на непрерывных скорах:
-- score_A: P(teacher | prompt) от classifier router A
-- score_B: learned-UQ probability или raw UQ signal от router B
-- score_C: irt_difficulty от router C
-
-Сохраняет:
-- outputs/routing/router_hybrid.joblib
-- outputs/routing/router_hybrid_config.csv
-- outputs/routing/router_hybrid_train_features.csv
-
-Пример запуска:
-python scripts/routing/07b_train_hybrid_router.py \
-  --features_csv outputs/routing/features_er.csv \
-  --output_dir outputs/routing \
-  --classifier_model_dir outputs/routing/router_classifier/best_model \
-  --classifier_threshold_csv outputs/routing/router_classifier_threshold.csv \
-  --uq_model_path outputs/routing/router_uncertainty_lr.joblib \
-  --uq_config_csv outputs/routing/router_uncertainty_config.csv \
-  --target_teacher_rate 0.2 \
-  --device cuda:0
-"""
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -40,11 +14,6 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, classificat
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-
-
-# ──────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────
 
 def evaluate_at_threshold(labels, probs, threshold):
     preds = (probs >= threshold).astype(int)
@@ -98,10 +67,7 @@ def safe_float(x, default=0.0):
     return v
 
 
-# ──────────────────────────────────────────────
 # A-score extractor
-# ──────────────────────────────────────────────
-
 class ClassifierScorer:
     def __init__(self, model_dir, device):
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -128,10 +94,7 @@ class ClassifierScorer:
         return np.array(all_probs, dtype=np.float32)
 
 
-# ──────────────────────────────────────────────
 # B-score extractor
-# ──────────────────────────────────────────────
-
 def build_b_scores(df, uq_model_path=None, uq_config_csv=None):
     uq_features = ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]
 
@@ -149,7 +112,6 @@ def build_b_scores(df, uq_model_path=None, uq_config_csv=None):
     X_uq = X_uq.values.astype(np.float32)
     X_uq = np.nan_to_num(X_uq, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Вариант 1: есть learned UQ model bundle
     if uq_model_path is not None and os.path.exists(uq_model_path):
         bundle = joblib.load(uq_model_path)
         model = bundle["model"]
@@ -157,7 +119,6 @@ def build_b_scores(df, uq_model_path=None, uq_config_csv=None):
         probs = model.predict_proba(scaler.transform(X_uq))[:, 1]
         return probs.astype(np.float32), "learned_uq_probability"
 
-    # Вариант 2: fallback на raw best signal из config
     if uq_config_csv is not None and os.path.exists(uq_config_csv):
         cfg = pd.read_csv(uq_config_csv).iloc[0]
         best_signal = cfg["best_signal"]
@@ -172,11 +133,6 @@ def build_b_scores(df, uq_model_path=None, uq_config_csv=None):
         return scores, f"raw_signal:{best_signal}"
 
     raise ValueError("Need either --uq_model_path or --uq_config_csv for B scores.")
-
-
-# ──────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Train Hybrid Router D (A+B+C)")
@@ -263,7 +219,7 @@ def main():
     print(f"Total samples: {len(df)}")
     print(f"Label distribution: {df['binary_label'].value_counts().to_dict()}")
 
-    # ── score_A ──
+    # score_A
     if not os.path.exists(args.classifier_model_dir):
         raise FileNotFoundError(f"classifier_model_dir not found: {args.classifier_model_dir}")
 
@@ -272,7 +228,7 @@ def main():
     score_A = scorer_A.predict_proba(df["prompt"].tolist(), batch_size=args.batch_size)
     print(f"score_A done: shape={score_A.shape}, mean={score_A.mean():.4f}")
 
-    # ── score_B ──
+    # score_B
     print("\nBuilding Router B scores...")
     score_B, b_source = build_b_scores(
         df,
@@ -281,7 +237,7 @@ def main():
     )
     print(f"score_B done from {b_source}: shape={score_B.shape}, mean={score_B.mean():.4f}")
 
-    # ── score_C ──
+    # score_C
     score_C = pd.to_numeric(df["irt_difficulty"], errors="coerce")
     med_c = score_C.median()
     if pd.isna(med_c):
@@ -290,7 +246,7 @@ def main():
     score_C = np.nan_to_num(score_C, nan=0.0, posinf=0.0, neginf=0.0)
     print(f"score_C done: shape={score_C.shape}, mean={score_C.mean():.4f}")
 
-    # ── Train table ──
+    # Train table
     hybrid_df = pd.DataFrame({
         "prompt": df["prompt"],
         "binary_label": df["binary_label"].astype(int),
@@ -343,7 +299,7 @@ def main():
     final_threshold = metrics["threshold"]
     final_preds = metrics["preds"]
 
-    print("\n=== Hybrid Router D (A+B+C) ===")
+    print("\nHybrid Router D (A+B+C)")
     print(f"Validation AUC-ROC:         {val_auc:.4f}")
     print(f"Threshold:                  {final_threshold:.4f}")
     print(f"Val F1 @ threshold:         {metrics['val_f1']:.4f}")
@@ -356,7 +312,7 @@ def main():
     for name, coef in zip(feature_names, model.coef_[0]):
         print(f" {name:<20}: {coef:+.4f}")
 
-    # ── Save model bundle ──
+    # Save model bundle
     bundle = {
         "model": model,
         "scaler": scaler,

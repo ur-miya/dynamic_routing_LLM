@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# scripts/05_compare_methods.py
+
 import sys
 import os
 import subprocess
@@ -13,7 +12,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def clear_gpu_memory():
-    """Очищает GPU память."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -21,14 +19,11 @@ def clear_gpu_memory():
 
 
 def load_loss_data(loss_file_path, model_name, gradient_accumulation_steps=16):
-    """
-    Загружает loss data с корректным масштабированием шагов и loss значений.
-    """
+
     df = pd.read_csv(loss_file_path)
     print(f"\nLoading {model_name} loss from {loss_file_path}")
     print(f"  Available columns: {df.columns.tolist()}")
     
-    # Определяем колонку с loss
     loss_col = None
     for col in ['total_loss', 'loss', 'train_loss', 'Loss', 'loss_skl']:
         if col in df.columns:
@@ -43,16 +38,13 @@ def load_loss_data(loss_file_path, model_name, gradient_accumulation_steps=16):
         else:
             raise ValueError(f"No numeric columns found in {loss_file_path}")
     
-    # Масштабируем loss для DistiLLM-2
     if 'total_loss' in df.columns and model_name == "DistiLLM-2":
         df['loss_scaled'] = df['total_loss'] * gradient_accumulation_steps
         loss_col = 'loss_scaled'
         print(f"  Scaling DistiLLM-2 loss by factor {gradient_accumulation_steps} for comparison")
     
-    # Определяем колонку для шагов
     step_col = None
     
-    # Для SoftKD: создаём глобальный step
     if 'batch_step' in df.columns and 'epoch' in df.columns and model_name == "SoftKD":
         steps_per_epoch = df[df['epoch'] == 0]['batch_step'].max() + 1
         df['global_step'] = df['epoch'] * steps_per_epoch + df['batch_step']
@@ -75,18 +67,15 @@ def load_loss_data(loss_file_path, model_name, gradient_accumulation_steps=16):
 
 
 def main():
-    # Конфигурация
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     GRADIENT_ACCUMULATION_STEPS = 16
     
-    # Пути
     softkd_model_dir = os.path.join(BASE_DIR, "outputs/softkd_model_5k_v2")
     distillm2_model_dir = os.path.join(BASE_DIR, "outputs/distillm2_model_5k_v3")
     eval_dir = os.path.join(BASE_DIR, "outputs/evaluation")
     
     os.makedirs(eval_dir, exist_ok=True)
     
-    # Файлы с результатами оценки
     softkd_eval_file = os.path.join(eval_dir, "softkd_model_5k_v2_summary.csv")
     distillm2_eval_file = os.path.join(eval_dir, "distillm2_model_5k_v3_summary.csv")
     
@@ -102,9 +91,8 @@ def main():
             print(f"  - {f}")
         return
     
-    print("\n=== Generating plots ===")
+    print("\nGenerating plots...")
     
-    # Загружаем лоссы
     softkd_loss_df, softkd_loss_col, softkd_step_col = load_loss_data(
         os.path.join(softkd_model_dir, "training_loss.csv"), 
         "SoftKD", 
@@ -116,25 +104,20 @@ def main():
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
     )
     
-    # Загружаем метрики
     softkd_metrics = pd.read_csv(softkd_eval_file)
     distillm2_metrics = pd.read_csv(distillm2_eval_file)
     
-    # =========================================================
-    # График 1: SoftKD Loss Curve (отдельно)
-    # =========================================================
-    print("\n--- Plot 1: SoftKD Training Loss ---")
+
+    print("\nPlot 1: SoftKD Training Loss ---")
     
     fig1, ax1 = plt.subplots(figsize=(12, 5))
     
-    # Сглаживание
     window_softkd = max(5, min(50, len(softkd_loss_df) // 10))
     softkd_loss_smooth = softkd_loss_df[softkd_loss_col].rolling(window_softkd, min_periods=1).mean()
     
     ax1.plot(softkd_loss_df[softkd_step_col], softkd_loss_smooth, 
              linewidth=1.5, color='steelblue')
     
-    # Добавляем точки на оригинальные данные (каждый 100-й шаг для наглядности)
     step_every = max(1, len(softkd_loss_df) // 100)
     ax1.scatter(softkd_loss_df[softkd_step_col][::step_every], 
                 softkd_loss_df[softkd_loss_col][::step_every],
@@ -146,7 +129,6 @@ def main():
     ax1.grid(True, alpha=0.3)
     ax1.legend(fontsize=10)
     
-    # Добавляем аннотацию с финальным loss
     final_softkd_loss = softkd_loss_df[softkd_loss_col].iloc[-1]
     ax1.annotate(f'Final Loss: {final_softkd_loss:.4f}', 
                  xy=(softkd_loss_df[softkd_step_col].iloc[-1], final_softkd_loss),
@@ -159,53 +141,34 @@ def main():
     plt.close()
     print(f"  SoftKD loss curve saved to {softkd_loss_file}")
     
-    # =========================================================
-    # График 2: DistiLLM-2 Loss Curve (отдельно)
-    # =========================================================
-    print("\n--- Plot 2: DistiLLM-2 Training Loss ---")
+    print("\nPlot 2: DistiLLM-2 Training Loss ---")
     
     fig2, ax2 = plt.subplots(figsize=(12, 5))
     
-    # Сглаживание
     window_distillm2 = max(3, min(20, len(distillm2_loss_df) // 5))
     distillm2_loss_smooth = distillm2_loss_df[distillm2_loss_col].rolling(window_distillm2, min_periods=1).mean()
     
     ax2.plot(distillm2_loss_df[distillm2_step_col], distillm2_loss_smooth, 
              linewidth=1.5, color='darkorange')
-    
-    # Добавляем точки на оригинальные данные
-    #ax2.scatter(distillm2_loss_df[distillm2_step_col], 
-     #           distillm2_loss_df[distillm2_loss_col],
-      #          s=15, alpha=0.5, color='darkorange', label='Original data')
-    
+
     ax2.set_xlabel('Global Training Step', fontsize=12)
     ax2.set_ylabel('Loss', fontsize=12)
     ax2.set_title('DistiLLM-2: Training Loss Curve', fontsize=14)
     ax2.grid(True, alpha=0.3)
-    #ax2.legend(fontsize=10)
-    
-    # Добавляем аннотацию с финальным loss
+
     final_distillm2_loss = distillm2_loss_df[distillm2_loss_col].iloc[-1]
     ax2.annotate(f'Final Loss: {final_distillm2_loss:.4f}', 
                  xy=(distillm2_loss_df[distillm2_step_col].iloc[-1], final_distillm2_loss),
                  xytext=(-100, -50), textcoords='offset points', 
                  fontsize=10, color='darkorange', fontweight='normal')
-    
-    # Добавляем информацию о количестве записей
-    #ax2.text(0.02, 0.95, f'Training steps recorded: {len(distillm2_loss_df)}', 
-     #        transform=ax2.transAxes, fontsize=9, verticalalignment='top',
-      #       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
+
     plt.tight_layout()
     distillm2_loss_file = os.path.join(eval_dir, "loss_curve_distillm2_5k_v3.png")
     plt.savefig(distillm2_loss_file, dpi=150)
     plt.close()
     print(f"  DistiLLM-2 loss curve saved to {distillm2_loss_file}")
-    
-    # =========================================================
-    # График 3: Сравнение метрик (bar chart)
-    # =========================================================
-    print("\n--- Plot 3: Metrics Comparison ---")
+
+    print("\nPlot 3: Metrics Comparison ---")
     
     metrics = ['rouge1_mean', 'rouge2_mean', 'rougeL_mean', 'bert_f1_mean']
     labels = ['ROUGE-1', 'ROUGE-2', 'ROUGE-L', 'BERTScore']
@@ -230,7 +193,6 @@ def main():
     ax3.legend(fontsize=11)
     ax3.grid(axis='y', alpha=0.3)
     
-    # Добавляем значения на столбцы
     for bar, val in zip(bars1, softkd_vals):
         ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
                 f'{val:.4f}', ha='center', va='bottom', fontsize=9)
@@ -247,23 +209,19 @@ def main():
     plt.close()
     print(f"  Metrics comparison saved to {metrics_file}")
     
-    # =========================================================
-    # Вывод финальных результатов в консоль
-    # =========================================================
     print("\n" + "="*60)
-    print("FINAL METRICS")
+    print("Metrics")
     print("="*60)
     print(f"\n{'Metric':<15} {'SoftKD':<12} {'DistiLLM-2':<12}")
     print("-" * 40)
     for label, s_val, d_val in zip(labels, softkd_vals, distillm2_vals):
         print(f"{label:<15} {s_val:<12.4f} {d_val:<12.4f}")
     
-    # Сравнение с baseline
     baseline_summary = os.path.join(eval_dir, 'baseline_summary.csv')
     if os.path.exists(baseline_summary):
         baseline_df = pd.read_csv(baseline_summary)
         print(f"\n{'='*60}")
-        print("IMPROVEMENT OVER BASELINE")
+        print("Improvement over baseline")
         print("="*60)
         print(f"\n{'Metric':<15} {'Baseline':<12} {'SoftKD Δ':<12} {'DistiLLM-2 Δ':<12}")
         print("-" * 55)
@@ -273,7 +231,6 @@ def main():
             distillm2_change = ((distillm2_vals[metrics.index(metric)] - baseline_val) / baseline_val) * 100
             print(f"{label:<15} {baseline_val:<12.4f} {softkd_change:+.1f}%{'':<7} {distillm2_change:+.1f}%")
     
-    # Статистика по DistiLLM-2
     if 'valid_samples' in distillm2_loss_df.columns:
         avg_valid_samples = distillm2_loss_df['valid_samples'].mean()
         print(f"\n{'='*60}")
@@ -283,9 +240,7 @@ def main():
         print(f"  Total training steps recorded: {len(distillm2_loss_df)}")
         print(f"  (Loss logged every {GRADIENT_ACCUMULATION_STEPS} steps due to gradient accumulation)")
     
-    print(f"\n{'='*60}")
-    print("OUTPUT FILES")
-    print("="*60)
+
     print(f"  SoftKD loss curve: {softkd_loss_file}")
     print(f"  DistiLLM-2 loss curve: {distillm2_loss_file}")
     print(f"  Metrics comparison: {metrics_file}")

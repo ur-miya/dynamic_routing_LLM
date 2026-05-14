@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-# scripts/02_evaluate_baseline.py
-"""
-Оценка базовой модели студента на test.csv (или любом другом CSV).
-Генерирует ответы + UQ-метрики (mean_token_entropy, max_token_entropy, seq_nll).
-
-Запуск:
-    CUDA_VISIBLE_DEVICES=7 \
-    python scripts/02_evaluate_baseline.py \
-        --test_file data/raw/oasst1/test.csv \
-        --output_dir outputs/evaluation \
-        --batch_size 4 \
-        --device cuda:0
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,11 +9,6 @@ import torch
 from tqdm import tqdm
 import evaluate
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-
-# ──────────────────────────────────────────────
-# Генерация с UQ-метриками (общая функция, как в 08)
-# ──────────────────────────────────────────────
 
 def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_size=4):
     responses, uq_list = [], []
@@ -96,11 +77,6 @@ def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_si
 
     return responses, uq_list
 
-
-# ──────────────────────────────────────────────
-# Главная функция
-# ──────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
         description='Evaluate baseline student model: generate responses + UQ metrics'
@@ -131,7 +107,7 @@ def main():
         '--output_prefix', type=str, default='baseline',
         help='Prefix for output files: <prefix>_detailed.csv, <prefix>_summary.csv'
     )
-    # Базовая модель (студент без LoRA)
+
     parser.add_argument(
         '--base_model', type=str,
         default='Qwen/Qwen2.5-1.5B-Instruct',
@@ -144,7 +120,6 @@ def main():
         return
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Загрузка данных ──
     print(f"Loading data from {args.test_file}")
     df = pd.read_csv(args.test_file)
     if args.max_samples:
@@ -154,7 +129,6 @@ def main():
     prompts    = df["prompt"].tolist()
     references = df["reply"].tolist()
 
-    # ── Загрузка модели ──
     print(f"Loading model: {args.base_model}")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     tokenizer.padding_side = "left"
@@ -168,7 +142,6 @@ def main():
     )
     model.eval()
 
-    # ── Генерация ответов + UQ ──
     student_responses, uq_list = generate_with_uq(
         model, tokenizer, prompts,
         max_new_tokens=args.max_new_tokens,
@@ -179,12 +152,10 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    # ── UQ-столбцы → DataFrame ──
     df["student_response"] = student_responses
     for col in ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]:
         df[col] = [uq[col] for uq in uq_list]
 
-    # ── ROUGE ──
     print("Computing ROUGE...")
     rouge = evaluate.load("rouge")
     rouge_agg  = rouge.compute(predictions=student_responses, references=references)
@@ -194,7 +165,6 @@ def main():
     df["rouge2"] = rouge_per["rouge2"]
     df["rougeL"] = rouge_per["rougeL"]
 
-    # ── BERTScore ──
     print("Computing BERTScore...")
     bertscore = evaluate.load("bertscore")
     bs = bertscore.compute(
@@ -203,12 +173,10 @@ def main():
     )
     df["bert_f1"] = bs["f1"]
 
-    # ── Сохранение ──
     detailed_path = os.path.join(args.output_dir, f"{args.output_prefix}_detailed.csv")
     df.to_csv(detailed_path, index=False)
     print(f"Detailed results saved → {detailed_path}")
 
-    # Сводка
     summary = {
         "num_samples":   len(df),
         "rouge1_mean":   df["rouge1"].mean(),
@@ -222,7 +190,7 @@ def main():
         os.path.join(args.output_dir, f"{args.output_prefix}_summary.csv"), index=False
     )
 
-    print("\n=== SUMMARY ===")
+    print("\nSummary")
     for k, v in summary.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 

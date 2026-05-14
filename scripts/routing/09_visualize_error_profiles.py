@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/09_visualize_error_profiles.py
-"""
-Генерирует пакет визуализаций для документирования профилей ошибок студента:
-
-  1. Bar chart: распределение классов ошибок (error taxonomy)
-  2. KDE + histogram: распределение UQ-сигналов по label (0 vs 1)
-  3. Heatmap: тип ошибки (кластер) × средняя энтропия
-  4. Scatter: irt_difficulty vs BERTScore (цвет по label)
-  5. Correlation heatmap: все признаки vs binary_label
-  6. Calibration curve: entropy → fraction of label=1
-
-Результат: outputs/routing/plots/
-
-Запуск:
-    python scripts/routing/09_visualize_error_profiles.py \
-        --features_csv outputs/routing/features_er.csv \
-        --error_profiles_csv outputs/routing/error_profiles_er.csv \
-        --error_taxonomy_csv outputs/routing/error_taxonomy_er.csv \
-        --output_dir outputs/routing/plots
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -77,16 +56,14 @@ def main():
     df = pd.read_csv(args.features_csv)
     print(f"Total samples: {len(df)}")
 
-    palette = {0: "#4CAF50", 1: "#F44336"}  # зелёный=student OK, красный=teacher needed
+    palette = {0: "#4CAF50", 1: "#F44336"}  
     label_names = {0: "Student OK (label=0)", 1: "Needs Teacher (label=1)"}
 
-    # ──────────────────────────────────────────────
     # Plot 1: Распределение классов ошибок (taxonomy bar chart)
-    # ──────────────────────────────────────────────
     if os.path.exists(args.error_taxonomy_csv):
         print("Plot 1: Error taxonomy bar chart")
         df_tax = pd.read_csv(args.error_taxonomy_csv)
-        df_tax = df_tax.head(15)  # топ-15 кластеров
+        df_tax = df_tax.head(15)  
 
         fig, ax = plt.subplots(figsize=(12, 6))
         colors_bar = plt.cm.Reds(np.linspace(0.4, 0.9, len(df_tax)))[::-1]
@@ -113,9 +90,7 @@ def main():
     else:
         print("Plot 1: skipped (error_taxonomy_er.csv not found)")
 
-    # ──────────────────────────────────────────────
     # Plot 2: Распределение UQ-сигналов по label
-    # ──────────────────────────────────────────────
     uq_signals = [c for c in ["mean_token_entropy", "max_token_entropy", "seq_nll"]
                   if c in df.columns]
     if uq_signals:
@@ -142,20 +117,17 @@ def main():
         plt.close()
         print("  Saved: 02_uq_distributions.png")
 
-    # ──────────────────────────────────────────────
     # Plot 3: Heatmap тип ошибки × средняя энтропия
-    # ──────────────────────────────────────────────
     if os.path.exists(args.error_profiles_csv) and "mean_token_entropy" in df.columns:
         print("Plot 3: Error cluster × entropy heatmap")
         df_prof = pd.read_csv(args.error_profiles_csv)
 
         if "cluster_id" in df_prof.columns and "cluster_name" in df_prof.columns:
-            # Совмещаем с features для получения entropy
+
             df_prof_merged = df_prof.merge(
                 df[["prompt", "mean_token_entropy"]],
                 on="prompt", how="left"
             )
-            # Топ-10 кластеров
             top_clusters = df_prof_merged["cluster_id"].value_counts().head(10).index.tolist()
             df_top = df_prof_merged[df_prof_merged["cluster_id"].isin(top_clusters)].copy()
 
@@ -186,9 +158,7 @@ def main():
             plt.close()
             print("  Saved: 03_cluster_entropy_heatmap.png")
 
-    # ──────────────────────────────────────────────
     # Plot 4: Scatter irt_difficulty vs BERTScore
-    # ──────────────────────────────────────────────
     if "irt_difficulty" in df.columns and "bert_f1" in df.columns:
         print("Plot 4: IRT difficulty vs BERTScore scatter")
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -211,9 +181,7 @@ def main():
         plt.close()
         print("  Saved: 04_irt_vs_bertscore.png")
 
-    # ──────────────────────────────────────────────
     # Plot 5: Correlation heatmap признаков vs binary_label
-    # ──────────────────────────────────────────────
     numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns
                     if c not in ["binary_label"]]
     if numeric_cols:
@@ -233,9 +201,7 @@ def main():
         plt.close()
         print("  Saved: 05_feature_correlations.png")
 
-    # ──────────────────────────────────────────────
     # Plot 6: ROUGE-1 and BERTScore distributions
-    # ──────────────────────────────────────────────
     if "rouge1" in df.columns and "bert_f1" in df.columns:
         print("Plot 6: Quality metric distributions by label")
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))

@@ -1,13 +1,3 @@
-# scripts/03_evaluate_distilled.py  [FIXED]
-#
-# ИЗМЕНЕНИЯ:
-#   - Добавлен suppress_tokens=[13708, 766, 29] для подавления <think>-тегов
-#     (Qwen2.5-1.5B-Instruct токенизирует '<think>' как ['<th','ink','>'])
-#   - repetition_penalty: 1.0 → 1.1 (предотвращает петли повторений)
-#   - padding_side: 'left' → 'right' (консистентно с обучением)
-#   - Добавлен аргумент --suppress_think (по умолчанию True) для гибкости
-#   - Улучшена очистка ответа: убирается и промпт, и возможный суффикс <|im_end|>
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,8 +12,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import evaluate
 from bert_score import BERTScorer
 
-# Токены, из которых состоит '<think>' в Qwen2.5-1.5B-Instruct
-# tokenizer.tokenize('<think>') -> ['<th', 'ink', '>'] -> [13708, 766, 29]
 THINK_TOKEN_IDS = [13708, 766, 29] # для soft kd
 THINK_TOKEN_IDS = [13708] # для distillm2
 
@@ -48,7 +36,6 @@ def main():
                         help='Device to use (cuda:0, cuda:4, cpu)')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Limit number of test samples (for debugging)')
-    # FIX: флаг подавления <think> токенов
     parser.add_argument('--suppress_think', action='store_true', default=True,
                         help='Suppress <think> tokens during generation (default: True). '
                              'Используй --no-suppress_think чтобы отключить.')
@@ -86,7 +73,7 @@ def main():
     print(f"suppress_think: {args.suppress_think} (token ids: {THINK_TOKEN_IDS})")
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
-    tokenizer.padding_side = 'right'   # FIX: было 'left', консистентно с обучением
+    tokenizer.padding_side = 'right'   
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -125,10 +112,9 @@ def main():
             eos_token_id=tokenizer.eos_token_id,
             use_cache=True,
             num_beams=1,
-            repetition_penalty=1.1,      # FIX: было 1.0, добавлена защита от петель
+            repetition_penalty=1.1,    
         )
 
-        # FIX: подавляем токены <think> чтобы модель не уходила в thinking-режим
         if args.suppress_think:
             generate_kwargs["suppress_tokens"] = THINK_TOKEN_IDS
 
@@ -137,12 +123,10 @@ def main():
 
         responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-        # Очищаем промпт из ответа
         cleaned_responses = []
         for formatted_prompt, response in zip(formatted_prompts, responses):
             if response.startswith(formatted_prompt):
                 response = response[len(formatted_prompt):].lstrip()
-            # Убираем trailing <|im_end|> если остался после skip_special_tokens
             response = response.replace("<|im_end|>", "").strip()
             cleaned_responses.append(response)
 
@@ -210,7 +194,7 @@ def main():
     summary_file = os.path.join(args.output_dir, f'{model_name}_summary.csv')
     summary_df.to_csv(summary_file, index=False)
 
-    print("\n=== DISTILLED MODEL SUMMARY ===")
+    print("\nDistilled model summary")
     for k, v in summary.items():
         if isinstance(v, float):
             print(f"{k}: {v:.4f}")
@@ -220,7 +204,7 @@ def main():
     baseline_summary = os.path.join(args.output_dir, 'baseline_summary.csv')
     if os.path.exists(baseline_summary):
         baseline_df = pd.read_csv(baseline_summary)
-        print("\n=== COMPARISON WITH BASELINE ===")
+        print("\nCOmparison with baseline")
         print(f"{'Metric':<20} {'Baseline':<12} {'Distilled':<12} {'Change':<12}")
         print("-" * 56)
         for metric in ['rouge1_mean', 'rouge2_mean', 'rougeL_mean', 'bert_f1_mean']:

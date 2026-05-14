@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/05_train_router_classifier.py
-"""
-Подход A: Classifier-based Router (RouteLLM-стиль).
-Обучает BERT/ModernBERT классификатор промптов на метках (0=student, 1=teacher).
-
-Результат:
-  outputs/routing/router_classifier/        (веса модели)
-  outputs/routing/router_classifier_train_log.csv
-  outputs/routing/router_classifier_threshold.csv
-
-Установка: pip install transformers sentence-transformers scikit-learn
-
-Запуск (с фиксированным TCR=0.3):
-    python scripts/routing/05_train_router_classifier.py \
-        --features_csv outputs/routing/features_er.csv \
-        --output_dir outputs/routing \
-        --model_name answerdotai/ModernBERT-base \
-        --num_epochs 3 \
-        --device cuda:0 \
-        --target_teacher_rate 0.3
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -41,11 +19,6 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 from tqdm import tqdm
-
-
-# ──────────────────────────────────────────────
-# Dataset
-# ──────────────────────────────────────────────
 
 class PromptDataset(Dataset):
     def __init__(self, prompts, labels, tokenizer, max_length=256):
@@ -72,12 +45,7 @@ class PromptDataset(Dataset):
         }
 
 
-# ──────────────────────────────────────────────
-# Вспомогательные функции для порога
-# ──────────────────────────────────────────────
-
 def collect_val_probs(model, dataloader, device):
-    """Собирает вероятности класса=1 и метки на валидации."""
     model.eval()
     all_probs, all_labels = [], []
     with torch.no_grad():
@@ -96,7 +64,6 @@ def collect_val_probs(model, dataloader, device):
 
 
 def evaluate_at_threshold(labels, probs, threshold):
-    """Возвращает метрики при заданном пороге."""
     preds = (probs >= threshold).astype(int)
     f1 = f1_score(labels, preds, average="binary", zero_division=0)
     acc = accuracy_score(labels, preds)
@@ -115,9 +82,6 @@ def evaluate_at_threshold(labels, probs, threshold):
 
 
 def calibrate_threshold_best_f1(labels, probs):
-    """
-    Старый режим: перебирает пороги [0.1, 0.9] с шагом 0.05 и выбирает лучший по F1.
-    """
     best = None
     for t in np.arange(0.1, 0.95, 0.05):
         metrics = evaluate_at_threshold(labels, probs, t)
@@ -127,34 +91,18 @@ def calibrate_threshold_best_f1(labels, probs):
 
 
 def find_threshold_for_target_rate(probs, target_rate):
-    """
-    Выбирает порог так, чтобы доля примеров с prob>=threshold была ≈ target_rate.
-    Важно: это делает именно target по Teacher Call Rate, а не по F1.
-    """
     probs = np.asarray(probs)
     if target_rate <= 0.0:
-        # Никогда не вызывать teacher
         return float(1.0)
     if target_rate >= 1.0:
-        # Всех к teacher
         return float(0.0)
-    # Teacher вызывается при prob >= threshold,
-    # значит, нам нужен квантиль верхних target_rate процентов.
     return float(np.quantile(probs, 1.0 - target_rate))
 
 
 def calibrate_threshold_with_target_rate(labels, probs, target_rate):
-    """
-    Режим с ограничением по Teacher Call Rate:
-    выбираем порог по квантилю и считаем метрики.
-    """
+
     thr = find_threshold_for_target_rate(probs, target_rate)
     return evaluate_at_threshold(labels, probs, thr)
-
-
-# ──────────────────────────────────────────────
-# Главная функция
-# ──────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -193,7 +141,6 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--seed', type=int, default=42)
 
-    # Новый аргумент: целевой Teacher Call Rate
     parser.add_argument(
         '--target_teacher_rate',
         type=float,
@@ -215,7 +162,6 @@ def main():
     model_save_dir = os.path.join(args.output_dir, "router_classifier")
     os.makedirs(model_save_dir, exist_ok=True)
 
-    # ── Загрузка данных ──
     print(f"Loading {args.features_csv}")
     df = pd.read_csv(args.features_csv)
     print(f"Total samples: {len(df)}")
@@ -226,7 +172,6 @@ def main():
 
     print(f"Label distribution: {df['binary_label'].value_counts().to_dict()}")
 
-    # Перемешиваем
     df = df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
 
     # Train/val split
@@ -235,7 +180,7 @@ def main():
     df_train = df.iloc[val_size:].reset_index(drop=True)
     print(f"Train: {len(df_train)}, Val: {len(df_val)}")
 
-    # ── Tokenizer & Dataset ──
+    # Tokenizer & Dataset
     print(f"\nLoading tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -253,14 +198,12 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    # ── Модель ──
     print(f"Loading model: {args.model_name}")
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, num_labels=2
     )
     model = model.to(args.device)
 
-    # ── Оптимизатор ──
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     total_steps = len(train_loader) * args.num_epochs
     scheduler = get_linear_schedule_with_warmup(
@@ -268,12 +211,10 @@ def main():
         num_warmup_steps=int(0.1 * total_steps),
         num_training_steps=total_steps,
     )
-
-    # ── Обучение ──
     best_val_f1 = 0.0
     train_log = []
 
-    print(f"\n=== Training BERT Router (Approach A) ===")
+    print(f"\nTraining BERT Router (Approach A)")
     for epoch in range(args.num_epochs):
         model.train()
         epoch_loss = 0.0
@@ -306,10 +247,8 @@ def main():
         train_acc = accuracy_score(all_labels_train, all_preds)
         avg_loss = epoch_loss / len(train_loader)
 
-        # Валидация: сначала собираем probs/labels
         val_probs, val_labels = collect_val_probs(model, val_loader, args.device)
 
-        # Режим выбора порога
         if args.target_teacher_rate is not None:
             selection_mode = f"target_teacher_rate={args.target_teacher_rate}"
             metrics = calibrate_threshold_with_target_rate(
@@ -346,18 +285,15 @@ def main():
             "target_teacher_rate": args.target_teacher_rate,
         })
 
-        # Сохраняем лучшую модель по val_f1 (как и раньше)
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             model.save_pretrained(os.path.join(model_save_dir, "best_model"))
             tokenizer.save_pretrained(os.path.join(model_save_dir, "best_model"))
             print(f"  → Best model saved (val_f1={best_val_f1:.4f})")
 
-    # Сохраняем финальную модель
     model.save_pretrained(os.path.join(model_save_dir, "final_model"))
     tokenizer.save_pretrained(os.path.join(model_save_dir, "final_model"))
 
-    # Финальная калибровка на всей валидации с тем же режимом
     val_probs, val_labels = collect_val_probs(model, val_loader, args.device)
     if args.target_teacher_rate is not None:
         selection_mode = f"target_teacher_rate={args.target_teacher_rate}"
@@ -372,7 +308,7 @@ def main():
     final_f1 = final_metrics["val_f1"]
     final_tcr = final_metrics["val_teacher_call_rate"]
 
-    print(f"\n=== Final calibration ({selection_mode}) ===")
+    print(f"\nFinal calibration ({selection_mode})")
     print(f"Threshold: {final_threshold:.3f}")
     print(f"Val F1 @ threshold: {final_f1:.4f}")
     print(f"Val Teacher Call Rate: {final_tcr:.4f}")
@@ -382,7 +318,6 @@ def main():
         target_names=["student", "teacher"]
     ))
 
-    # Сохраняем лог и инфо о пороге
     pd.DataFrame(train_log).to_csv(
         os.path.join(args.output_dir, "router_classifier_train_log.csv"), index=False
     )

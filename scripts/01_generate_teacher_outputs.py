@@ -1,4 +1,3 @@
-# scripts/01_generate_teacher_outputs_parallel.py
 import sys
 import os
 import time
@@ -14,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Будем использовать threading.Lock для безопасной записи чекпоинтов
 save_lock = threading.Lock()
 
 def process_single_prompt(args):
@@ -29,7 +27,6 @@ def process_single_prompt(args):
         return idx, "", False
     
 def find_last_checkpoint(output_dir):
-    """Ищет последний сохранённый чекпоинт и возвращает DataFrame с уже обработанными данными."""
     checkpoint_file = os.path.join(output_dir, 'checkpoint_latest.csv')
     if os.path.exists(checkpoint_file):
         print(f"Found checkpoint: {checkpoint_file}")
@@ -69,7 +66,6 @@ def main():
         full_df = full_df.head(args.max_samples)
     total_samples = len(full_df)
 
-    # Проверяем чекпоинт
     checkpoint_df = find_last_checkpoint(args.output_dir)
     responses = [None] * total_samples
     start_idx = 0
@@ -97,11 +93,9 @@ def main():
         'no_think': args.no_think
     }
 
-    # Создаём задачи с учётом сдвига индексов и задержки
     tasks = [(start_idx + i, prompts[i], teacher, gen_kwargs, args.request_delay) 
              for i in range(len(prompts))]
 
-    # Запуск параллельной обработки (process_single_prompt должна принимать delay)
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
         futures = [executor.submit(process_single_prompt, task) for task in tasks]
         with tqdm(total=len(futures), desc="Generating") as pbar:
@@ -110,7 +104,6 @@ def main():
                 responses[idx] = response
                 pbar.update(1)
 
-                # Сохраняем чекпоинт
                 if idx % args.checkpoint_every == 0:
                     with save_lock:
                         temp_df = full_df.copy()
@@ -123,7 +116,6 @@ def main():
     full_df.to_csv(output_file, index=False)
     print(f"\nSaved results to {output_file}")
     
-    # Статистика
     successful = len([r for r in responses if r and r != ""])
     print(f"\nStatistics:")
     print(f"Total: {len(df)}")

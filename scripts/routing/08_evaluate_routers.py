@@ -1,27 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/08_evaluate_routers.py
-"""
-Финальная оценка роутеров на тестовой выборке (test.csv, по умолчанию первые 500 примеров).
-
-Для каждого роутера вычисляет:
-  - Routing Accuracy, F1, AUC-ROC
-  - Teacher Call Rate (%)
-  - Quality blended (взвешенное качество: ответы студента там где student, учителя где teacher)
-
-Результат:
-  outputs/routing/router_comparison.csv
-  outputs/routing/router_comparison.png
-
-Запуск:
-    python scripts/routing/08_evaluate_routers.py \
-        --test_csv data/raw/oasst1/test.csv \
-        --student_responses_csv outputs/evaluation/distilled_detailed_5k.csv \
-        --lora_path outputs/distillm2_model_5k/ \
-        --routing_dir outputs/routing \
-        --output_dir outputs/routing \
-        --device cuda:0 \
-        --max_samples 500
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -44,13 +20,7 @@ from transformers import (
 import evaluate
 import joblib
 
-
-# ──────────────────────────────────────────────
-# Генерация ответов студента с UQ-метриками
-# ──────────────────────────────────────────────
-
 def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_size=4):
-    """Генерирует ответы + UQ-метрики для списка промптов."""
     responses, uq_list = [], []
 
     for i in range(0, len(prompts), batch_size):
@@ -84,23 +54,19 @@ def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_si
 
         for idx in range(len(batch)):
             input_ids_row = inputs["input_ids"][idx]
-            # длина input — просто длина ряда (промпт уже включён)
             actual_input_len = input_ids_row.shape[0]
 
             new_ids = sequences[idx][actual_input_len:]
 
-            # обрезаем по первому eos
             eos_pos = (new_ids == eos_id).nonzero(as_tuple=True)[0]
             if len(eos_pos) > 0:
                 new_ids = new_ids[:eos_pos[0].item()]
 
-            # убираем pad внутри сгенерированного
             new_ids = new_ids[new_ids != pad_id]
 
             response = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
             responses.append(response)
 
-            # UQ по только что обрезанным токенам
             sample_scores = [s[idx] for s in scores[:max(len(new_ids), 1)]]
             entropies, nlls = [], []
             for logits, tid in zip(sample_scores, new_ids):
@@ -122,13 +88,8 @@ def generate_with_uq(model, tokenizer, prompts, max_new_tokens, device, batch_si
 
     return responses, uq_list
 
-
-# ──────────────────────────────────────────────
-# Роутеры
-# ──────────────────────────────────────────────
-
 class ClassifierRouter:
-    """Подход A: BERT-классификатор."""
+    # Подход A: классификатор
     def __init__(self, model_dir, tokenizer_dir, threshold, device):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
@@ -157,7 +118,7 @@ class ClassifierRouter:
 
 
 class UncertaintyRouter:
-    """Подход B: Learned uncertainty router на UQ-фичах."""
+    # Подход B: Learned uncertainty router на UQ-фичах
     def __init__(self, model_path, threshold, feature_names):
         bundle = joblib.load(model_path)
         self.model = bundle["model"]
@@ -192,7 +153,7 @@ class UncertaintyRouter:
 
 
 class IRTRouter:
-    """Подход C: IRT-difficulty routing."""
+    #Подход C: IRT-difficulty routing
     def __init__(self, irt_csv, threshold):
         df = pd.read_csv(irt_csv)
         if "prompt" not in df.columns or "irt_difficulty" not in df.columns:
@@ -208,7 +169,7 @@ class IRTRouter:
         return (diffs >= self.threshold).astype(int), diffs
 
 class HybridRouter:
-    """Подход D: Hybrid router на признаках A + B + C."""
+    # Подход D: Hybrid router на признаках A + B + C
     def __init__(self, model_path, threshold):
         bundle = joblib.load(model_path)
         self.model = bundle["model"]
@@ -233,10 +194,6 @@ class HybridRouter:
         scores = self.model.predict_proba(X)[:, 1]
         decisions = (scores >= self.threshold).astype(int)
         return decisions, scores
-
-# ──────────────────────────────────────────────
-# Главная функция
-# ──────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -314,14 +271,12 @@ def main():
     gc.collect()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Загрузка тестовых данных ──
     print(f"Loading test data from {args.test_csv}")
     df_test = pd.read_csv(args.test_csv).head(args.max_samples).reset_index(drop=True)
     prompts = df_test["prompt"].tolist()
     references = df_test["reply"].tolist()
     print(f"Test samples: {len(df_test)}")
 
-    # ── Ответы студента (с UQ-метриками) ──
     student_responses = None
     uq_list = None
 
@@ -329,7 +284,6 @@ def main():
         print(f"Loading existing student responses from {args.student_responses_csv}")
         df_stu = pd.read_csv(args.student_responses_csv).head(args.max_samples)
 
-        # берём ответы студента (distilled_response или student_response)
         student_responses = df_stu.get(
             "distilled_response",
             df_stu.get("student_response", [""] * len(df_stu))
@@ -337,10 +291,7 @@ def main():
     else:
         raise ValueError(f"student_responses_csv not found: {args.student_responses_csv}")
 
-    # полный список UQ-сигналов, которые хотим иметь везде
     uq_cols = ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]
-
-    # нужно ли досчитывать UQ?
     uq_needed = not all(c in df_stu.columns for c in uq_cols)
 
     if uq_needed:
@@ -368,13 +319,10 @@ def main():
 
         del _model
         torch.cuda.empty_cache()
-
-        # обновляем df_stu: ответы + UQ
         df_stu["student_response"] = student_responses
         for col in uq_cols:
             df_stu[col] = [u[col] for u in uq_list]
 
-        # перезаписываем baseline_detailed.csv
         df_stu.to_csv(args.student_responses_csv, index=False)
         print(f"Updated {args.student_responses_csv} with UQ metrics")
 
@@ -388,11 +336,9 @@ def main():
                 "first_token_entropy": float(row["first_token_entropy"]),
                 "seq_nll":             float(row["seq_nll"]),
             })
-        # ответы берём из df_stu
         response_col = "distilled_response" if "distilled_response" in df_stu.columns else "student_response"
         student_responses = df_stu[response_col].tolist()
 
-    # ── Бинарные метки (ground truth) ──
     rouge_metric = evaluate.load("rouge")
 
     print("Computing quality metrics on test set...")
@@ -402,13 +348,10 @@ def main():
         use_aggregator=False
     )
 
-    # отладка
-    # ── Сохранение UQ на тесте ──
     df_test_uq = pd.DataFrame(uq_list)
     df_test_uq.insert(0, "prompt", prompts)
     df_test_uq.to_csv(os.path.join(args.output_dir, "test_uq.csv"), index=False)
     print(f"Test UQ features saved → {os.path.join(args.output_dir, 'test_uq.csv')}")
-    # конец отладки
 
     if args.label_mode == "rouge_only":
         gt_labels = (np.array(rouge_ps["rouge1"]) < args.rouge_threshold).astype(int)
@@ -433,7 +376,6 @@ def main():
     else:
         raise ValueError(f"Unknown label_mode: {args.label_mode}")
 
-    # ── Инициализация роутеров ──
     routers = {}
 
     # Подход A: Classifier
@@ -501,7 +443,7 @@ def main():
     else:
         print(f"[WARNING] Router B config not found at {uq_config_csv}")
 
-    # Подход C: IRT (опционально, можно пока не использовать)
+    # Подход C: IRT 
     irt_csv = os.path.join(args.routing_dir, "irt_difficulties_er.csv")
     irt_config = os.path.join(args.routing_dir, "router_irt_config.csv")
     if os.path.exists(irt_csv) and os.path.exists(irt_config):
@@ -561,9 +503,8 @@ def main():
     else:
         print(f"[INFO] Router D config not found at {hybrid_config_csv}")
 
-    # ── Оценка каждого роутера ──
     results = []
-    teacher_responses = references  # gold reply как "учитель"
+    teacher_responses = references  
 
     hybrid_feature_frame = None
 
@@ -599,7 +540,6 @@ def main():
     for name, router in routers.items():
         print(f"\n=== Evaluating Router {name} ===")
 
-        # Предсказание
         if name == "A_Classifier":
             decisions, scores = router.route(prompts)
         elif name == "B_Uncertainty":
@@ -611,7 +551,6 @@ def main():
         else:
             continue
 
-        # Метрики маршрутизации
         acc = accuracy_score(gt_labels, decisions)
         f1 = f1_score(gt_labels, decisions, average="binary", zero_division=0)
         try:
@@ -620,7 +559,6 @@ def main():
             auc = 0.0
         teacher_rate = decisions.mean() * 100.0
 
-        # Blended quality: router=0 → студент, router=1 → учитель
         blended_preds = [
             teacher_responses[i] if decisions[i] == 1 else student_responses[i]
             for i in range(len(prompts))
@@ -650,7 +588,6 @@ def main():
             "rougeL_blended": rouge_blended["rougeL"],
         })
 
-    # ── Baseline (всегда студент / всегда учитель) ──
     rouge_student_only = rouge_metric.compute(
         predictions=student_responses, references=references
     )
@@ -678,7 +615,6 @@ def main():
         "rougeL_blended": rouge_teacher_only["rougeL"],
     })
 
-    # ── Сохранение и визуализация ──
     results_df = pd.DataFrame(results)
     results_path = os.path.join(args.output_dir, "router_comparison.csv")
     results_df.to_csv(results_path, index=False)
@@ -687,7 +623,6 @@ def main():
     print("\n=== ROUTER COMPARISON ===")
     print(results_df.to_string(index=False))
 
-    # Bar charts для сравнительных метрик
     df_plot = results_df[results_df["routing_accuracy"].notna()].copy()
     if len(df_plot) > 0:
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))

@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# scripts/03_generate_teacher_logprobs.py
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.teacher import TeacherModel
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CHECKPOINT_LOCK = None  # можно использовать threading.Lock, но для простоты не будем
+CHECKPOINT_LOCK = None  
 
 def process_single_prompt(args):
     idx, prompt, teacher, gen_kwargs, top_logprobs, delay = args
@@ -31,12 +28,11 @@ def save_checkpoint(output_dir, all_results, original_df, checkpoint_every):
     """Сохраняет промежуточный чекпоинт в JSON Lines."""
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_file = os.path.join(output_dir, "checkpoint_latest.jsonl")
-    # Формируем список словарей для сохранения
     records = []
     for i, result in enumerate(all_results):
         if result is not None and isinstance(result, tuple) and len(result) == 2:
             text, logprobs = result
-            if text is not None:  # уже обработан успешно
+            if text is not None:  
                 records.append({
                     "prompt": original_df.iloc[i]["prompt"],
                     "teacher_response": text,
@@ -70,15 +66,13 @@ def main():
                         help="Delay between requests (seconds)")
     args = parser.parse_args()
 
-    # Загрузка данных
     full_df = pd.read_csv(args.input_file)
     if args.max_samples:
         full_df = full_df.head(args.max_samples)
     total_samples = len(full_df)
 
-    # Проверка чекпоинта
     checkpoint_path = os.path.join(args.output_dir, "checkpoint_latest.jsonl")
-    all_responses = [None] * total_samples   # каждый элемент: (text, logprobs) или None
+    all_responses = [None] * total_samples  
     processed_indices = set()
     
     if os.path.exists(checkpoint_path):
@@ -86,7 +80,6 @@ def main():
         with open(checkpoint_path, "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
-                # найти индекс по prompt (допустим, промпты уникальны)
                 idx = full_df[full_df["prompt"] == data["prompt"]].index
                 if len(idx) > 0:
                     i = idx[0]
@@ -96,7 +89,6 @@ def main():
     else:
         print("No checkpoint found, starting from scratch")
 
-    # Определяем, какие промпты ещё не обработаны
     pending_indices = [i for i in range(total_samples) if all_responses[i] is None]
     if not pending_indices:
         print("All samples already processed.")
@@ -111,11 +103,9 @@ def main():
         "temperature": args.temperature,
     }
 
-    # Формируем задачи: (original_index, prompt, teacher, gen_kwargs, top_logprobs, delay)
     tasks = [(pending_indices[i], prompts[i], teacher, gen_kwargs, args.top_logprobs, args.request_delay)
              for i in range(len(prompts))]
 
-    # Параллельная обработка
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
         futures = [executor.submit(process_single_prompt, task) for task in tasks]
         with tqdm(total=len(futures), desc="Generating logprobs") as pbar:
@@ -124,13 +114,10 @@ def main():
                 all_responses[idx] = (text, logprobs)
                 pbar.update(1)
 
-                # Сохраняем чекпоинт каждые N примеров (по количеству обработанных)
-                # Используем len(processed_indices) + количество завершённых
                 completed = sum(1 for r in all_responses if r is not None)
                 if completed % args.checkpoint_every == 0 and completed > 0:
                     save_checkpoint(args.output_dir, all_responses, full_df, args.checkpoint_every)
 
-    # Финальное сохранение всего датасета
     os.makedirs(args.output_dir, exist_ok=True)
     final_output = os.path.join(args.output_dir, "teacher_logprobs_full.jsonl")
     with open(final_output, "w", encoding="utf-8") as f:
@@ -146,8 +133,7 @@ def main():
                 "teacher_logprobs": logprobs
             }
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    # Также сохраняем финальную копию как checkpoint
+            
     save_checkpoint(args.output_dir, all_responses, full_df, args.checkpoint_every)
 
     successful = sum(1 for r in all_responses if r is not None and r[0] != "")

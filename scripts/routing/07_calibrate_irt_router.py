@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/07_calibrate_irt_router.py
-"""
-Подход C: IRT-based Router.
-Калибрует порог по irt_difficulty на train_er,
-который используется для маршрутизации: если difficulty > threshold → teacher.
-
-Результат:
-  outputs/routing/router_irt_config.csv  (threshold, f1, auroc)
-
-Запуск:
-    python scripts/routing/07_calibrate_irt_router.py \
-        --features_csv outputs/routing/features_er.csv \
-        --output_dir outputs/routing
-"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -67,7 +52,6 @@ def main():
 
     print(f"Total samples: {len(df)}")
 
-    # Калибровочная выборка
     df = df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
     val_size = int(len(df) * args.val_split)
     df_cal = df.iloc[:val_size].reset_index(drop=True)
@@ -75,7 +59,6 @@ def main():
     labels     = df_cal["binary_label"].values
     difficulty = df_cal["irt_difficulty"].fillna(df_cal["irt_difficulty"].median()).values
 
-    # AUROC
     try:
         auc = roc_auc_score(labels, difficulty)
     except Exception as e:
@@ -103,7 +86,6 @@ def main():
     print(f"\nClassification report:")
     print(classification_report(labels, preds, target_names=["student", "teacher"]))
 
-    # Scatter plot: irt_difficulty vs binary_label
     """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -134,14 +116,12 @@ def main():
     print(f"\nPlot saved to {plot_path}")
     """
 
-    # Корреляция difficulty с метриками качества
     print(f"\nCorrelation irt_difficulty with quality metrics:")
     for col in ["rouge1", "rougeL", "bert_f1", "mean_token_entropy"]:
         if col in df_cal.columns:
             corr = np.corrcoef(difficulty, df_cal[col].fillna(0).values)[0, 1]
             print(f"  {col:<25}: r={corr:.4f}")
 
-    # Сохраняем конфиг
     config = {
         "threshold": opt_threshold,
         "auroc": auc,

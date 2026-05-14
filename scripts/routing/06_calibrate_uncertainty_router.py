@@ -1,30 +1,3 @@
-#!/usr/bin/env python3
-# scripts/routing/06_calibrate_uncertainty_router.py
-"""
-Подход B: Learned Uncertainty Router.
-
-Обучает логистическую регрессию на UQ-фичах:
-- mean_token_entropy
-- max_token_entropy
-- first_token_entropy
-- seq_nll
-
-Калибрует порог:
-- либо под target_teacher_rate,
-- либо по best F1 на calibration set.
-
-Сохраняет:
-- outputs/routing/router_uncertainty_lr.joblib
-- outputs/routing/router_uncertainty_config.csv
-- outputs/routing/router_uncertainty_train_features.csv
-
-Пример запуска:
-python scripts/routing/06_calibrate_uncertainty_router.py \
-  --features_csv outputs/routing/features_er.csv \
-  --output_dir outputs/routing \
-  --target_teacher_rate 0.2
-"""
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -47,7 +20,6 @@ from sklearn.preprocessing import StandardScaler
 
 
 def eval_threshold(labels, scores, thr):
-    """Метрики при пороге: score >= thr -> teacher."""
     preds = (scores >= thr).astype(int)
     f1 = f1_score(labels, preds, average="binary", zero_division=0)
     acc = accuracy_score(labels, preds)
@@ -62,7 +34,6 @@ def eval_threshold(labels, scores, thr):
 
 
 def youden_threshold(labels, scores):
-    """Порог по Youden's J."""
     fpr, tpr, thresholds = roc_curve(labels, scores)
     j_stat = tpr - fpr
     best_idx = np.argmax(j_stat)
@@ -70,7 +41,6 @@ def youden_threshold(labels, scores):
 
 
 def threshold_for_target_tcr(scores, target_teacher_rate):
-    """Порог по квантилю для teacher-call-rate."""
     scores = np.asarray(scores)
     if target_teacher_rate <= 0.0:
         return float(scores.max()) + 1e-8
@@ -80,7 +50,6 @@ def threshold_for_target_tcr(scores, target_teacher_rate):
 
 
 def build_uq_matrix(frame, feature_names):
-    """Строит матрицу UQ-фичей с безопасной обработкой NaN/inf."""
     X = frame[feature_names].copy()
     for c in feature_names:
         med = pd.to_numeric(X[c], errors="coerce").median()
@@ -165,7 +134,7 @@ def main():
 
     print(f"Available UQ features: {available_features}")
 
-    # ── Split into train/calibration ──
+    # Split into train/calibration
     if args.val_csv is not None:
         print(f"Using external validation set: {args.val_csv}")
         df_cal = pd.read_csv(args.val_csv).reset_index(drop=True)
@@ -190,7 +159,7 @@ def main():
     train_feat_df.to_csv(train_feat_path, index=False)
     print(f"Training UQ features saved to {train_feat_path}")
 
-    # ── Train learned LR router ──
+    # Train learned LR router
     scaler = StandardScaler()
     X_tr_s = scaler.fit_transform(X_tr)
     X_cal_s = scaler.transform(X_cal)
@@ -211,7 +180,7 @@ def main():
         print(f"[WARNING] AUROC failed: {e}")
         auc_learned = 0.0
 
-    # ── Threshold calibration ──
+    # Threshold calibration
     if args.target_teacher_rate is not None:
         selection_mode = f"target_teacher_rate={args.target_teacher_rate}"
         thr = threshold_for_target_tcr(probs_cal, args.target_teacher_rate)
@@ -227,7 +196,7 @@ def main():
     best_tcr = metrics_thr["val_teacher_call_rate"]
     preds_best = metrics_thr["preds"]
 
-    print(f"\n=== Learned UQ Router (Approach B) ===")
+    print(f"\nLearned UQ Router (Approach B)")
     print(f" AUROC: {auc_learned:.4f}")
     print(f" Threshold: {best_threshold:.4f}")
     print(f" Val F1 @ threshold: {best_f1:.4f}")
@@ -246,7 +215,7 @@ def main():
     for name, coef in zip(available_features, model.coef_[0]):
         print(f" {name:<25}: {coef:+.4f}")
 
-    # ── Save joblib bundle ──
+    # Save joblib bundle
     model_path = os.path.join(args.output_dir, "router_uncertainty_lr.joblib")
     bundle = {
         "model": model,
@@ -256,7 +225,7 @@ def main():
     joblib.dump(bundle, model_path)
     print(f"\nLearned UQ model saved to {model_path}")
 
-    # ── Save config ──
+    # Save config
     config = {
         "router": "B_Uncertainty",
         "model_path": model_path,
@@ -278,10 +247,8 @@ def main():
     pd.DataFrame([config]).to_csv(config_path, index=False)
     print(f"Uncertainty router config saved to {config_path}")
 
-    # ── Diagnostics plot ──
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # ROC
     try:
         fpr, tpr, _ = roc_curve(y_cal, probs_cal)
         axes[0].plot(fpr, tpr, label=f"Learned UQ LR (AUC={auc_learned:.3f})", color="darkorange")
@@ -295,7 +262,6 @@ def main():
         axes[0].text(0.1, 0.5, f"ROC unavailable:\n{e}", fontsize=10)
         axes[0].set_title("ROC Curve — unavailable")
 
-    # Probability histogram
     axes[1].hist(probs_cal[y_cal == 0], bins=30, alpha=0.6, label="student", color="steelblue")
     axes[1].hist(probs_cal[y_cal == 1], bins=30, alpha=0.6, label="teacher", color="crimson")
     axes[1].axvline(best_threshold, color="black", linestyle="--", label=f"thr={best_threshold:.3f}")
