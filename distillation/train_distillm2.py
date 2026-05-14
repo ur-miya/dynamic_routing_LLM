@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-# distillation/train_distillm2.py  [FIXED v2]
-#
-# ИСПРАВЛЕНЫ БАГИ:
-#   BUG-1: logits[:len] сравнивались с teacher_logprobs[0..N] — смещение на
-#           ~prompt_len позиций. Теперь оффсет = prompt_len - 1.
-#   BUG-2: padding_side="left" → "right" (prompt_len из датасета стабилен).
-#   BUG-3: Формула комбинации лоссов не соответствовала DistiLLM-2.
-#           Было:    0.5 * (loss_skl + beta * loss_srkl)
-#           Стало:   (1 - beta) * loss_skl + beta * loss_srkl
-#   BUG-5: Чистые SKL/SRKL с top_k=10 не ограничивают остальные ~150k токенов
-#           → mode collapse. Добавлен CE loss на TGO-ответах как регуляризатор.
-#           loss = (1-beta)*skl + beta*srkl + alpha_ce * ce_loss
-#   MISC:   max_length увеличен до 1024.
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,7 +42,6 @@ def parse_args():
                         help="Параметр alpha для SKL/SRKL интерполяции")
     parser.add_argument("--beta_max", type=float, default=1.0)
     parser.add_argument("--beta_min", type=float, default=0.0)
-    # BUG-5 FIX: CE regularization
     parser.add_argument("--alpha_ce", type=float, default=0.3,
                         help="Вес CE loss. Итоговый loss = (1-beta)*skl + beta*srkl + alpha_ce*ce. "
                              "Рекомендуется 0.2-0.4.")
@@ -100,7 +84,6 @@ def load_combined_dataset(tgo_file, sgo_file, max_samples):
 
 
 def tokenize_function(examples, tokenizer, max_length=1024):
-    # BUG-1+2 FIX: вычисляем prompt_len для корректного оффсета
     prompt_parts = [
         f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
         for p in examples["prompt"]
@@ -125,7 +108,6 @@ def tokenize_function(examples, tokenizer, max_length=1024):
 
 
 def collate_fn(batch, tokenizer):
-    # BUG-2 FIX: padding_side="right" задан при инициализации tokenizer
     padded_tgo = tokenizer.pad(
         {"input_ids":      [item["input_ids_tgo"]     for item in batch],
          "attention_mask": [item["attention_mask_tgo"] for item in batch]},
@@ -224,7 +206,6 @@ def main():
         epoch_loss = epoch_skl = epoch_srkl = epoch_ce = 0.0
         progress = tqdm(dataloader, desc=f"Epoch {epoch+1}")
 
-        # BUG-3 FIX: beta линейно растёт от 0 до 1 — переход SKL→SRKL
         beta = get_beta(epoch, args.num_epochs, beta_max=args.beta_max, beta_min=args.beta_min)
 
         for step, batch in enumerate(progress):
@@ -234,7 +215,6 @@ def main():
             attn_mask_sgo  = batch["attention_mask_sgo"].to(device)
             prompt_lens_batch = batch["prompt_lens"]
 
-            # Два forward pass: TGO (для SKL + CE) и SGO (для SRKL)
             outputs_tgo = model(input_ids=input_ids_tgo, attention_mask=attn_mask_tgo)
             logits_tgo  = outputs_tgo.logits
 
@@ -246,7 +226,6 @@ def main():
             valid_samples = 0
 
             for i in range(logits_tgo.shape[0]):
-                # BUG-1 FIX: оффсет = prompt_len - 1
                 pl = prompt_lens_batch[i]
 
                 loss_skl  = torch.tensor(0.0, device=device)
@@ -254,7 +233,6 @@ def main():
                 loss_ce   = torch.tensor(0.0, device=device)
                 sample_valid = False
 
-                # --- TGO stream: SKL ---
                 lp_tgo = batch["teacher_logprobs_tgo"][i]
                 if len(lp_tgo) > 0:
                     start = pl - 1
@@ -271,11 +249,9 @@ def main():
                             sum_skl += skl.item()
                             sample_valid = True
 
-                        # BUG-5 FIX: CE loss на TGO-ответе как регуляризатор
-                        # Используем уже вычисленные logits_tgo — без второго forward pass
                         labels = input_ids_tgo[i].clone()
-                        labels[:pl]          = -100   # маскируем промпт
-                        labels[pl + act_len:] = -100   # маскируем паддинг
+                        labels[:pl]          = -100  
+                        labels[pl + act_len:] = -100 
                         ce_logits = logits_tgo[i, :-1, :].contiguous()
                         ce_labels = labels[1:].contiguous()
                         ce = F.cross_entropy(ce_logits.float(), ce_labels, ignore_index=-100)
@@ -283,7 +259,6 @@ def main():
                             loss_ce = ce
                             sum_ce += ce.item()
 
-                # --- SGO stream: SRKL ---
                 lp_sgo = batch["teacher_logprobs_sgo"][i]
                 if len(lp_sgo) > 0:
                     start = pl - 1
@@ -302,7 +277,6 @@ def main():
 
                 if sample_valid:
                     valid_samples += 1
-                    # BUG-3 FIX: оригинальная формула DistiLLM-2 + CE регуляризация
                     kd_part = (1.0 - beta) * loss_skl + beta * loss_srkl
                     total_loss += kd_part + args.alpha_ce * loss_ce
 

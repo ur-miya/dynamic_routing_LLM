@@ -1,4 +1,3 @@
-# distillation/curriculum_utils.py
 import json
 import math
 import numpy as np
@@ -6,9 +5,7 @@ from typing import List, Dict, Any
 from datasets import Dataset
 
 def compute_entropy_from_logprobs(logprobs_list: List[Dict]) -> float:
-    """
-    Вычисляет среднюю энтропию Шеннона по всем токенам ответа учителя.
-    """
+
     entropies = []
     for token_data in logprobs_list:
         top_logprobs = token_data.get('top_logprobs', [])
@@ -25,7 +22,6 @@ def compute_entropy_from_logprobs(logprobs_list: List[Dict]) -> float:
     return np.mean(entropies)
 
 def add_entropy_to_dataset(dataset: Dataset, logprobs_field: str = "teacher_logprobs") -> Dataset:
-    """Добавляет колонку 'entropy'."""
     entropies = []
     for example in dataset:
         logprobs = example[logprobs_field]
@@ -35,7 +31,6 @@ def add_entropy_to_dataset(dataset: Dataset, logprobs_field: str = "teacher_logp
     return dataset.add_column("entropy", entropies)
 
 def sort_dataset_by_entropy(dataset: Dataset, ascending: bool = True) -> Dataset:
-    """Сортирует датасет по энтропии (ascending=True: от простых к сложным)."""
     if "entropy" not in dataset.column_names:
         dataset = add_entropy_to_dataset(dataset)
     sorted_indices = np.argsort(dataset["entropy"])

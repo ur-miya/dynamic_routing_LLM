@@ -1,4 +1,3 @@
-# distillation/soft_kd_loss.py
 import math
 import torch
 import torch.nn.functional as F
@@ -10,18 +9,11 @@ def get_token_ids_with_fallback(
     student_tokenizer,
     token_bytes: Optional[List[int]] = None
 ) -> Tuple[List[int], List[float]]:
-    """
-    Преобразует токен в ID с fallback на субвордное разбиение.
-    
-    Returns:
-        Tuple[List[int], List[float]]: (список ID токенов, список весов для каждого)
-    """
-    # 1. Прямое преобразование
+
     tid = student_tokenizer.convert_tokens_to_ids(token_str)
     if tid != student_tokenizer.unk_token_id:
         return [tid], [1.0]
     
-    # 2. Пробуем декодировать байты (если есть)
     if token_bytes:
         try:
             decoded = bytes(token_bytes).decode('utf-8', errors='ignore')
@@ -33,14 +25,12 @@ def get_token_ids_with_fallback(
         except Exception:
             pass
     
-    # 3. Пробуем токенизировать строку напрямую
     subwords = student_tokenizer.tokenize(token_str)
     if subwords:
         ids = student_tokenizer.convert_tokens_to_ids(subwords)
         weight = 1.0 / len(ids)
         return ids, [weight] * len(ids)
     
-    # 4. Если ничего не помогло — возвращаем пустой список
     return [], []
 
 
@@ -50,12 +40,7 @@ def filter_valid_tokens_with_fallback(
     student_tokenizer,
     teacher_bytes_list: Optional[List[Optional[List[int]]]] = None
 ) -> Tuple[List[int], List[float], int]:
-    """
-    Фильтрует токены с fallback на субворды.
-    
-    Returns:
-        Tuple[List[int], List[float], int]: (ID токенов, вероятности, количество)
-    """
+
     valid_indices = []
     valid_probs = []
     
@@ -69,8 +54,6 @@ def filter_valid_tokens_with_fallback(
     
     if not valid_indices:
         return [], [], 0
-    
-    # Перенормируем вероятности
     total = sum(valid_probs)
     if total == 0:
         return [], [], 0
@@ -86,16 +69,7 @@ def soft_kd_loss(
     temperature: float = 2.0,
     top_k: int = 10,
 ) -> torch.Tensor:
-    """
-    Soft Knowledge Distillation loss with subword fallback for token mismatches.
-    
-    Args:
-        student_logits: [seq_len, vocab_size] — логиты студента
-        teacher_logprobs_list: список словарей с 'top_logprobs'
-        student_tokenizer: токенизатор студента
-        temperature: температура для сглаживания
-        top_k: количество топ-токенов для рассмотрения
-    """
+
     seq_len = student_logits.shape[0]
     kd_loss = 0.0
     valid_positions = 0
@@ -106,7 +80,6 @@ def soft_kd_loss(
         if not top_logprobs:
             continue
         
-        # Извлекаем топ-K токенов, вероятности и bytes
         tokens = []
         teacher_probs = []
         teacher_bytes = []
@@ -127,7 +100,6 @@ def soft_kd_loss(
             continue
         teacher_probs = [p / total for p in teacher_probs]
         
-        # Фильтруем токены с fallback на субворды
         valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens_with_fallback(
             tokens, teacher_probs, student_tokenizer, teacher_bytes
         )
@@ -135,10 +107,8 @@ def soft_kd_loss(
         if num_valid == 0:
             continue
         
-        # Преобразуем в тензоры
         valid_teacher_probs_tensor = torch.tensor(valid_teacher_probs, device=student_logits.device)
         
-        # Логиты студента для валидных токенов
         student_logits_t = student_logits[pos, valid_indices] / temperature
         student_logits_t = torch.clamp(student_logits_t, min=-50, max=50)
         
@@ -146,7 +116,6 @@ def soft_kd_loss(
         student_probs = torch.clamp(student_probs, min=1e-8, max=1.0)
         log_student_probs = torch.log(student_probs)
         
-        # KL divergence
         teacher_log_probs = torch.log(torch.clamp(valid_teacher_probs_tensor, min=1e-8, max=1.0))
         kl = torch.sum(valid_teacher_probs_tensor * (teacher_log_probs - log_student_probs))
         

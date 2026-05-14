@@ -1,8 +1,3 @@
-"""
-DistiLLM-2 loss functions: SKL and SRKL with token-level decomposition.
-Subword fallback for token mismatches between teacher and student tokenizers.
-"""
-
 import torch
 import torch.nn.functional as F
 import math
@@ -14,18 +9,10 @@ def get_token_ids_with_fallback(
     student_tokenizer,
     token_bytes: Optional[List[int]] = None
 ) -> Tuple[List[int], List[float]]:
-    """
-    Преобразует токен в ID с fallback на субвордное разбиение.
-    
-    Returns:
-        Tuple[List[int], List[float]]: (список ID токенов, список весов для каждого)
-    """
-    # 1. Прямое преобразование
     tid = student_tokenizer.convert_tokens_to_ids(token_str)
     if tid != student_tokenizer.unk_token_id:
         return [tid], [1.0]
     
-    # 2. Пробуем декодировать байты (если есть)
     if token_bytes:
         try:
             decoded = bytes(token_bytes).decode('utf-8', errors='ignore')
@@ -37,7 +24,6 @@ def get_token_ids_with_fallback(
         except Exception:
             pass
     
-    # 3. Пробуем токенизировать строку напрямую
     subwords = student_tokenizer.tokenize(token_str)
     if subwords:
         ids = student_tokenizer.convert_tokens_to_ids(subwords)
@@ -53,12 +39,7 @@ def filter_valid_tokens_with_fallback(
     student_tokenizer,
     teacher_bytes_list: Optional[List[Optional[List[int]]]] = None
 ) -> Tuple[List[int], List[float], int]:
-    """
-    Фильтрует токены с fallback на субворды.
-    
-    Returns:
-        Tuple[List[int], List[float], int]: (ID токенов, вероятности, количество)
-    """
+
     valid_indices = []
     valid_probs = []
     
@@ -73,7 +54,6 @@ def filter_valid_tokens_with_fallback(
     if not valid_indices:
         return [], [], 0
     
-    # Перенормируем вероятности
     total = sum(valid_probs)
     if total == 0:
         return [], [], 0
@@ -91,11 +71,7 @@ def compute_skl_loss(
     temperature: float = 2.0,
     debug: bool = False
 ) -> torch.Tensor:
-    """
-    SKL: D_SKL^{alpha}(p || q) = KL(p || alpha*p + (1-alpha)*q)
-    student_logits: [seq_len, vocab_size]
-    teacher_logprobs_list: list of dicts with 'top_logprobs' (list of {token, logprob, bytes})
-    """
+
     seq_len = student_logits.shape[0]
     loss = 0.0
     valid_tokens = 0
@@ -110,7 +86,6 @@ def compute_skl_loss(
         
         total_teacher_tokens += 1
         
-        # Извлекаем топ-K токенов, вероятности и bytes
         tokens = []
         teacher_probs = []
         teacher_bytes = []
@@ -131,7 +106,6 @@ def compute_skl_loss(
             continue
         teacher_probs = [p / total_teacher for p in teacher_probs]
         
-        # Фильтруем токены с fallback на субворды
         valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens_with_fallback(
             tokens, teacher_probs, tokenizer, teacher_bytes
         )
@@ -141,21 +115,17 @@ def compute_skl_loss(
         
         total_filtered_tokens += num_valid
         
-        # Преобразуем в тензоры
         valid_teacher_probs_tensor = torch.tensor(valid_teacher_probs, device=student_logits.device)
         
-        # Логиты студента для валидных токенов
         student_logits_t = student_logits[pos, valid_indices] / temperature
         student_logits_t = torch.clamp(student_logits_t, min=-50, max=50)
         student_probs = F.softmax(student_logits_t, dim=0)
         student_probs = torch.clamp(student_probs, min=1e-8, max=1.0)
         
-        # Interpolated distribution: q_interp = alpha * p + (1-alpha) * q
         q_interp = alpha * valid_teacher_probs_tensor + (1 - alpha) * student_probs
         q_interp = torch.clamp(q_interp, min=1e-8, max=1.0)
         log_q_interp = torch.log(q_interp)
         
-        # KL(p || q_interp)
         teacher_log = torch.log(torch.clamp(valid_teacher_probs_tensor, min=1e-8, max=1.0))
         kl = torch.sum(valid_teacher_probs_tensor * (teacher_log - log_q_interp))
         
@@ -183,9 +153,8 @@ def compute_srkl_loss(
     temperature: float = 2.0,
     debug: bool = False
 ) -> torch.Tensor:
-    """
-    SRKL: D_SRKL^{alpha}(p || q) = KL(q || (1-alpha)*p + alpha*q)
-    """
+  
+    # SRKL
     seq_len = student_logits.shape[0]
     loss = 0.0
     valid_tokens = 0
@@ -220,7 +189,6 @@ def compute_srkl_loss(
             continue
         teacher_probs = [p / total_teacher for p in teacher_probs]
         
-        # Фильтруем токены с fallback на субворды
         valid_indices, valid_teacher_probs, num_valid = filter_valid_tokens_with_fallback(
             tokens, teacher_probs, tokenizer, teacher_bytes
         )
@@ -237,12 +205,10 @@ def compute_srkl_loss(
         student_probs = F.softmax(student_logits_t, dim=0)
         student_probs = torch.clamp(student_probs, min=1e-8, max=1.0)
         
-        # Interpolated distribution: p_interp = (1-alpha)*p + alpha*q
         p_interp = (1 - alpha) * valid_teacher_probs_tensor + alpha * student_probs
         p_interp = torch.clamp(p_interp, min=1e-8, max=1.0)
         log_p_interp = torch.log(p_interp)
         
-        # KL(q || p_interp)
         student_log = torch.log(student_probs)
         kl = torch.sum(student_probs * (student_log - log_p_interp))
         
@@ -269,9 +235,9 @@ def compute_alpha_curriculum(
     clip_max: float = 0.1,
     eps: float = 1e-8
 ) -> float:
-    """
-    Curriculum update for alpha based on the difference between teacher and student probabilities.
-    """
+    
+    # Curriculum update for alpha based on the difference between teacher and student probabilities.
+    
     ratio = p_prob / (q_prob + eps)
     inv_ratio = q_prob / (p_prob + eps)
     denom = ratio + inv_ratio - 2 + eps
@@ -286,7 +252,6 @@ def get_beta(
     beta_max: float = 1.0,
     beta_min: float = 0.0
 ) -> float:
-    """Linear schedule for beta over epochs."""
     if total_epochs <= 1:
         return beta_max
     progress = epoch / (total_epochs - 1)

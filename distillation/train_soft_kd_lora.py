@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-# distillation/train_soft_kd_lora.py  [FIXED v2]
-#
-# ИСПРАВЛЕНЫ БАГИ:
-#   BUG-1: logits[:max_len] сравнивались с teacher_logprobs[0..max_len] —
-#           смещение на ~prompt_len позиций. Теперь logits берётся начиная с
-#           позиции (prompt_len - 1), что соответствует первому токену ответа.
-#   BUG-2: padding_side="left" делал смещение переменным по батчу.
-#           Заменено на padding_side="right" — prompt_len из датасета напрямую
-#           задаёт корректный оффсет для любого элемента батча.
-#   BUG-5: Чистый KD с top_k=10 не ограничивает остальные ~150k токенов →
-#           mode collapse (генерация мусорных иероглифов). Добавлен CE loss
-#           на teacher_response токенах как регуляризатор полного распределения.
-#           loss = alpha_kd * kd_loss + (1 - alpha_kd) * ce_loss
-#   MISC:   max_length увеличен до 1024 (был 512 < prompt_len + response_len).
-
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,7 +34,6 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
-    # BUG-5 FIX: баланс между KD и CE loss
     parser.add_argument("--alpha_kd", type=float, default=0.5,
                         help="Доля KD loss; (1 - alpha_kd) — доля CE loss. "
                              "0.5 = равный вес; 0.7 = больше KD; 0.3 = больше CE.")
@@ -85,7 +68,6 @@ def tokenize_function(examples, tokenizer, max_length=1024):
 
     tokenized = tokenizer(texts, truncation=True, max_length=max_length, padding=False)
 
-    # BUG-1+2 FIX: prompt_len задаёт оффсет при right-padding
     prompt_lens = [
         len(tokenizer(pp)["input_ids"])
         for pp in prompt_parts
@@ -193,9 +175,8 @@ def main():
             teacher_logprobs_batch = batch["teacher_logprobs"]
             prompt_lens_batch      = batch["prompt_lens"]
 
-            # --- Один forward pass для KD logits ---
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits  = outputs.logits  # [B, seq_len, vocab_size]
+            logits  = outputs.logits 
 
             total_loss = 0.0
             total_kd   = 0.0
@@ -205,14 +186,13 @@ def main():
             for i in range(logits.shape[0]):
                 pl      = prompt_lens_batch[i]
                 lp_len  = len(teacher_logprobs_batch[i])
-                start   = pl - 1   # BUG-1 FIX: оффсет на prompt_len-1
+                start   = pl - 1  
                 end     = min(start + lp_len, logits.shape[1])
                 response_logits = logits[i, start:end, :]
                 actual_len = response_logits.shape[0]
                 if actual_len == 0:
                     continue
 
-                # --- KD loss (sparse, top_k токенов учителя) ---
                 kd_loss = soft_kd_loss(
                     response_logits,
                     teacher_logprobs_batch[i][:actual_len],
@@ -224,19 +204,13 @@ def main():
                     if step % 100 == 0:
                         print(f"[WARNING] Invalid kd_loss for sample {i}: {kd_loss.item()}")
                     continue
-
-                # --- CE loss (BUG-5 FIX: регуляризует полное распределение) ---
-                # labels: prompt → -100 (не учитываем), ответ → реальные токены
                 labels = input_ids[i].clone()
-                labels[:pl]              = -100  # маскируем промпт
-                labels[pl + actual_len:] = -100  # маскируем паддинг после ответа
-                # Используем уже вычисленные logits — не делаем второй forward pass
-                # CE = CrossEntropy(logits[i], labels), сдвиг: logits предсказывает следующий токен
-                # logits[i, k] → предсказание для labels[k+1]
-                ce_logits = logits[i, :-1, :].contiguous()           # [seq-1, vocab]
-                ce_labels = labels[1:].contiguous()                   # [seq-1]
+                labels[:pl]              = -100  
+                labels[pl + actual_len:] = -100  
+                ce_logits = logits[i, :-1, :].contiguous()          
+                ce_labels = labels[1:].contiguous()                
                 ce_loss = torch.nn.functional.cross_entropy(
-                    ce_logits.float(),   # float32 для стабильности
+                    ce_logits.float(), 
                     ce_labels,
                     ignore_index=-100
                 )
@@ -245,7 +219,6 @@ def main():
                         print(f"[WARNING] Invalid ce_loss for sample {i}: {ce_loss.item()}")
                     continue
 
-                # --- Комбинированный loss ---
                 sample_loss = args.alpha_kd * kd_loss + (1.0 - args.alpha_kd) * ce_loss
 
                 total_loss += sample_loss
