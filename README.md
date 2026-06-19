@@ -38,8 +38,7 @@ There is the implementation of four routing policies between the student and the
   ## Installation
 
 ```bash
-git clone <repo-url>
-cd <repo-name>
+git clone dynamic_routing_LLM
 python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
