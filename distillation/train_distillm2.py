@@ -23,9 +23,9 @@ load_dotenv()
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teacher_logprobs_file", type=str, required=True,
-                        help="JSONL с teacher_logprobs для TGO")
+                        help="JSONL с teacher_logprobs for TGO")
     parser.add_argument("--student_logprobs_file", type=str, required=True,
-                        help="JSONL с teacher_logprobs_sgo для SGO (из 04_generate_sgo_logprobs_fixed.py)")
+                        help="JSONL с teacher_logprobs_sgo for SGO")
     parser.add_argument("--output_dir", type=str, default="./distillm2_model")
     parser.add_argument("--max_samples", type=int, default=2000)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -39,12 +39,12 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--alpha0", type=float, default=0.1,
-                        help="Параметр alpha для SKL/SRKL интерполяции")
+                        help="Parameter alpha for SKL/SRKL")
     parser.add_argument("--beta_max", type=float, default=1.0)
     parser.add_argument("--beta_min", type=float, default=0.0)
     parser.add_argument("--alpha_ce", type=float, default=0.3,
-                        help="Вес CE loss. Итоговый loss = (1-beta)*skl + beta*srkl + alpha_ce*ce. "
-                             "Рекомендуется 0.2-0.4.")
+                        help="Weight of CE loss. Final loss = (1-beta)*skl + beta*srkl + alpha_ce*ce. "
+                             "0.2-0.4.")
     parser.add_argument("--use_curriculum", action="store_true")
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
@@ -292,7 +292,7 @@ def main():
             total_loss = total_loss / args.gradient_accumulation_steps
 
             if step % 100 == 0:
-                print(f"\n[DEBUG] Step {step}: valid={valid_samples}, beta={beta:.3f}")
+                #print(f"\n[DEBUG] Step {step}: valid={valid_samples}, beta={beta:.3f}")
                 print(f"  skl={avg_skl:.4f}  srkl={avg_srkl:.4f}  ce={avg_ce:.4f}")
                 print(f"  total={total_loss.item() * args.gradient_accumulation_steps:.6f}")
 

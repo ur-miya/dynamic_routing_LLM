@@ -1,10 +1,9 @@
 import json
 from evaluate import load
 import sys
-from utils import ask_teacher  # импортируем функцию
+from dynamic_routing_LLM.archive.utils import ask_teacher 
 import os
 
-# Загружаем ответы
 try:
     with open("teacher_student_answers.json", "r") as f:
         data = json.load(f)
@@ -18,8 +17,8 @@ questions = [item["question"] for item in data]
 
 print(f"Загружено {len(data)} примеров для оценки")
 
-# --- ROUGE ---
-print("\nВычисляем ROUGE...")
+# ROUGE
+print("\nCalculating ROUGE...")
 try:
     rouge = load("rouge")
     rouge_results = rouge.compute(predictions=student_texts, references=teacher_texts, use_aggregator=True)
@@ -27,10 +26,10 @@ try:
     for k, v in rouge_results.items():
         print(f"  {k}: {v:.4f}")
 except Exception as e:
-    print(f"Ошибка при вычислении ROUGE: {e}")
+    print(f"Error (ROUGE): {e}")
 
-# --- BERTScore ---
-print("\nВычисляем BERTScore...")
+# BERTScore
+print("\nCalculating BERTScore...")
 try:
     from bert_score import score as bert_score
     P, R, F1 = bert_score(student_texts, teacher_texts, lang="en", verbose=True)
@@ -40,12 +39,11 @@ try:
     print(f"  F1: {F1.mean():.4f}")
     bert_scores = F1.tolist()
 except Exception as e:
-    print(f"Ошибка при вычислении BERTScore: {e}")
+    print(f"Error (BERTScore): {e}")
     bert_scores = [None] * len(data)
 
-# --- LLM-as-a-Judge с обработкой тегов <think> ---
-print("\n--- LLM-as-a-Judge ---")
-print("Оцениваем ответы ученика с помощью учителя (может занять время)...")
+# LLM-as-a-Judge
+print("\nLLM-as-a-Judge")
 
 judge_scores = []
 judge_feedbacks = []
@@ -71,14 +69,11 @@ for i, item in enumerate(data):
     judge_response = ask_teacher(messages, max_tokens=500, temperature=0.3)
     
     if judge_response:
-        # Пытаемся найти JSON после </think>
         import re
-        # Ищем часть после </think> (если есть)
         after_think = re.search(r'</think>\s*(\{.*\})', judge_response, re.DOTALL | re.IGNORECASE)
         if after_think:
             json_str = after_think.group(1)
         else:
-            # Если нет тегов, ищем любой JSON в ответе
             json_match = re.search(r'(\{.*\})', judge_response, re.DOTALL)
             json_str = json_match.group(1) if json_match else None
         
@@ -110,7 +105,7 @@ for i, item in enumerate(data):
         print(f"  {i+1}. Нет ответа от учителя")
         judge_scores.append(None)
 
-# --- Сохраняем все результаты ---
+# Saving
 detailed = []
 for i, item in enumerate(data):
     entry = {
@@ -125,4 +120,4 @@ for i, item in enumerate(data):
 
 with open("evaluation_results.json", "w") as f:
     json.dump(detailed, f, indent=2, ensure_ascii=False)
-print("\nДетальные результаты сохранены в evaluation_results.json")
+print("\nResults are saved in evaluation_results.json")

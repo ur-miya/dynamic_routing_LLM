@@ -1,4 +1,3 @@
-# scripts/test_models.py
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -8,19 +7,15 @@ from models.teacher import TeacherModel
 import pandas as pd
 
 def test_student():
-    """Тестируем загрузку и генерацию студента."""
     print("\nTesting Student Model ")
     
-    # Загружаем студента
     student = StudentModel()
     
-    # Тестовые промпты
     test_prompts = [
         "What is the capital of France?",
         "Explain quantum computing in simple terms."
     ]
     
-    # Генерируем ответы
     responses = student.generate(test_prompts, max_new_tokens=100)
     
     for prompt, response in zip(test_prompts, responses):
@@ -30,7 +25,7 @@ def test_student():
     return student
 
 def test_teacher():
-    teacher = TeacherModel()  # параметры подхватятся из .env
+    teacher = TeacherModel() 
     prompts = [
         "What is knowledge distillation? Explain simply.",
         "Translate 'Hello, world!' to French."
@@ -42,10 +37,7 @@ def test_teacher():
     return teacher
 
 if __name__ == "__main__":
-    # Тестируем студента (должно работать сразу)
     student = test_student()
-    
-    # Тестируем учителя (только если настроен API)
     teacher = test_teacher()
     
     print("\nAll tests completed")

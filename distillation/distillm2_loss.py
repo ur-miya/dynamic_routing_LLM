@@ -237,7 +237,6 @@ def compute_alpha_curriculum(
 ) -> float:
     
     # Curriculum update for alpha based on the difference between teacher and student probabilities.
-    
     ratio = p_prob / (q_prob + eps)
     inv_ratio = q_prob / (p_prob + eps)
     denom = ratio + inv_ratio - 2 + eps

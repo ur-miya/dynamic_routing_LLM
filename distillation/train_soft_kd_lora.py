@@ -35,8 +35,7 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--alpha_kd", type=float, default=0.5,
-                        help="Доля KD loss; (1 - alpha_kd) — доля CE loss. "
-                             "0.5 = равный вес; 0.7 = больше KD; 0.3 = больше CE.")
+                        help="KD loss; (1 - alpha_kd) - CE loss. ")
     parser.add_argument("--use_curriculum", action="store_true")
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
@@ -237,7 +236,7 @@ def main():
             total_loss = total_loss / args.gradient_accumulation_steps
 
             if step % 100 == 0:
-                print(f"\n[DEBUG] Step {step}: valid={valid_samples_in_batch}")
+                #print(f"\n[DEBUG] Step {step}: valid={valid_samples_in_batch}")
                 print(f"  kd_loss={avg_kd:.4f}  ce_loss={avg_ce:.4f}")
                 print(f"  combined={total_loss.item() * args.gradient_accumulation_steps:.6f}")
                 print(f"  prompt_lens sample: {prompt_lens_batch[:4]}")

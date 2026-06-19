@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_URL = os.getenv("TEACHER_URL")
-API_PATH = "/v1/chat/completions"  # используем chat endpoint
+API_PATH = "/v1/chat/completions" 
 MODEL_NAME = os.getenv("TEACHER_MODEL")
 TOKEN = os.getenv("TEACHER_TOKEN")
 
@@ -27,7 +27,6 @@ def ask_teacher(messages):
     return response.json()["choices"][0]["message"]["content"]
 
 if __name__ == "__main__":
-    # Попросим учителя сгенерировать 5 разнообразных вопросов
     prompt = (
         "Придумай 5 разнообразных вопросов для тестирования языковых моделей. "
         "Вопросы должны покрывать разные темы: определение понятий, рассуждения, творчество, "
@@ -40,7 +39,6 @@ if __name__ == "__main__":
     for i, q in enumerate(questions, 1):
         print(f"{i}. {q}")
     
-    # Сохраним в файл для дальнейшего использования
     with open("test_prompts.txt", "w") as f:
         for q in questions:
             f.write(q + "\n")

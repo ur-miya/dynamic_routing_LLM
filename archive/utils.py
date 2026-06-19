@@ -15,7 +15,6 @@ HEADERS = {
 }
 
 def ask_teacher(messages, max_tokens=300, temperature=0.7):
-    """Универсальная функция для запроса к учителю через chat completions"""
     payload = {
         "model": TEACHER_MODEL,
         "messages": messages,
@@ -32,5 +31,5 @@ def ask_teacher(messages, max_tokens=300, temperature=0.7):
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"Ошибка при запросе к учителю: {e}")
+        print(f"Error: {e}")
         return None

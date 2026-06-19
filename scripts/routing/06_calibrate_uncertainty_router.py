@@ -1,35 +1,25 @@
+#!/usr/bin/env python3
+# scripts/routing/06_calibrate_uncertainty_router.py
+
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import argparse
-import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    roc_auc_score,
-    roc_curve,
-    f1_score,
-    accuracy_score,
-    classification_report,
-)
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, roc_curve, f1_score, classification_report
 
 
 def eval_threshold(labels, scores, thr):
     preds = (scores >= thr).astype(int)
     f1 = f1_score(labels, preds, average="binary", zero_division=0)
-    acc = accuracy_score(labels, preds)
     tcr = float(preds.mean())
     return {
         "threshold": float(thr),
         "val_f1": float(f1),
-        "val_acc": float(acc),
         "val_teacher_call_rate": tcr,
-        "preds": preds,
     }
 
 
@@ -49,21 +39,9 @@ def threshold_for_target_tcr(scores, target_teacher_rate):
     return float(np.quantile(scores, 1.0 - target_teacher_rate))
 
 
-def build_uq_matrix(frame, feature_names):
-    X = frame[feature_names].copy()
-    for c in feature_names:
-        med = pd.to_numeric(X[c], errors="coerce").median()
-        if pd.isna(med):
-            med = 0.0
-        X[c] = pd.to_numeric(X[c], errors="coerce").fillna(med)
-    X = X.values.astype(np.float32)
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-    return X
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Calibrate learned uncertainty-based router (Approach B)"
+        description="Calibrate uncertainty-based router (Approach B)"
     )
 
     parser.add_argument(
@@ -91,24 +69,35 @@ def main():
         help="Fraction of data for calibration validation"
     )
 
-    parser.add_argument(
-        "--val_csv",
-        type=str,
-        default=None,
-        help="External validation CSV for threshold calibration. If set, overrides --val_split."
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42
-    )
+    parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
         "--target_teacher_rate",
         type=float,
         default=None,
         help="If set, choose threshold so teacher_call_rate ≈ this value on validation."
+    )
+
+    parser.add_argument(
+        "--fixed_threshold",
+        type=float,
+        default=None,
+        help="If set, use this threshold directly and save it to router_uncertainty_config.csv."
+    )
+
+    parser.add_argument(
+        "--fixed_signal",
+        type=str,
+        default=None,
+        choices=["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"],
+        help="If set, force this UQ signal instead of auto-selecting best by AUROC."
+    )
+
+    parser.add_argument(
+        "--val_csv",
+        type=str,
+        default=None,
+        help="External validation CSV for threshold calibration. If set, overrides --val_split."
     )
 
     args = parser.parse_args()
@@ -126,15 +115,16 @@ def main():
     if "binary_label" not in df.columns:
         raise ValueError("features_csv must contain 'binary_label' column (0=student,1=teacher).")
 
-    uq_features = ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]
-    available_features = [c for c in uq_features if c in df.columns]
+    uq_signals = ["mean_token_entropy", "max_token_entropy", "first_token_entropy", "seq_nll"]
+    available_signals = [s for s in uq_signals if s in df.columns]
 
-    if len(available_features) == 0:
-        raise ValueError("No UQ features found in features_er.csv")
+    if not available_signals:
+        print("Error: no UQ signals found in features_er.csv")
+        print("Run 01_generate_student_responses_er.py first")
+        return
 
-    print(f"Available UQ features: {available_features}")
+    print(f"Available UQ signals: {available_signals}")
 
-    # Split into train/calibration
     if args.val_csv is not None:
         print(f"Using external validation set: {args.val_csv}")
         df_cal = pd.read_csv(args.val_csv).reset_index(drop=True)
@@ -147,135 +137,174 @@ def main():
 
     print(f"Calibration set: {len(df_cal)}, Training set: {len(df_tr)}")
 
-    X_tr = build_uq_matrix(df_tr, available_features)
-    y_tr = df_tr["binary_label"].values.astype(int)
+    labels = df_cal["binary_label"].values
 
-    X_cal = build_uq_matrix(df_cal, available_features)
-    y_cal = df_cal["binary_label"].values.astype(int)
+    print("\n=== UQ Signal AUROC (calibration set) ===")
+    results = []
+    for signal in available_signals:
+        if df_cal[signal].isna().all():
+            print(f" {signal}: all NaN, skipping")
+            continue
 
-    # Save training features for inspection
-    train_feat_df = df[["binary_label"] + [c for c in available_features if c in df.columns]].copy()
-    train_feat_path = os.path.join(args.output_dir, "router_uncertainty_train_features.csv")
-    train_feat_df.to_csv(train_feat_path, index=False)
-    print(f"Training UQ features saved to {train_feat_path}")
+        scores = df_cal[signal].fillna(df_cal[signal].median()).values
 
-    # Train learned LR router
-    scaler = StandardScaler()
-    X_tr_s = scaler.fit_transform(X_tr)
-    X_cal_s = scaler.transform(X_cal)
+        try:
+            auc = roc_auc_score(labels, scores)
+        except Exception as e:
+            print(f" {signal}: AUROC failed ({e})")
+            auc = 0.0
 
-    model = LogisticRegression(
-        C=1.0,
-        max_iter=2000,
-        class_weight="balanced",
-        random_state=args.seed
-    )
-    model.fit(X_tr_s, y_tr)
+        try:
+            youden_thr = youden_threshold(labels, scores)
+            youden_metrics = eval_threshold(labels, scores, youden_thr)
+            youden_f1 = youden_metrics["val_f1"]
+            youden_tcr = youden_metrics["val_teacher_call_rate"]
+        except Exception:
+            youden_thr = None
+            youden_f1 = 0.0
+            youden_tcr = 0.0
 
-    probs_cal = model.predict_proba(X_cal_s)[:, 1]
+        print(
+            f" {signal:<25}: AUROC={auc:.4f}, "
+            f"Youden_thr={youden_thr if youden_thr is not None else 'NA'}, "
+            f"Youden_F1={youden_f1:.4f}, Youden_TCR={youden_tcr:.3f}"
+        )
 
-    try:
-        auc_learned = roc_auc_score(y_cal, probs_cal)
-    except Exception as e:
-        print(f"[WARNING] AUROC failed: {e}")
-        auc_learned = 0.0
+        results.append({
+            "signal": signal,
+            "auroc": auc,
+            "youden_threshold": youden_thr,
+            "youden_f1": youden_f1,
+            "youden_teacher_call_rate": youden_tcr,
+        })
 
-    # Threshold calibration
-    if args.target_teacher_rate is not None:
+    if not results:
+        print("No valid UQ signals found")
+        return
+
+    results_df = pd.DataFrame(results).sort_values("auroc", ascending=False)
+
+    if args.fixed_signal is not None:
+        if args.fixed_signal not in available_signals:
+            raise ValueError(f"fixed_signal={args.fixed_signal} not found in available signals: {available_signals}")
+        best_signal = args.fixed_signal
+        best_auroc = float(results_df.loc[results_df["signal"] == best_signal, "auroc"].iloc[0])
+        signal_selection_mode = "fixed_signal"
+    else:
+        best_row = results_df.iloc[0]
+        best_signal = best_row["signal"]
+        best_auroc = best_row["auroc"]
+        signal_selection_mode = "best_by_auroc"
+
+    print(f"\n=== Selected UQ signal ===")
+    print(f" Signal: {best_signal}")
+    print(f" AUROC: {best_auroc:.4f}")
+    print(f" Signal selection mode: {signal_selection_mode}")
+
+    scores_best = df_cal[best_signal].fillna(df_cal[best_signal].median()).values
+
+    if args.fixed_threshold is not None:
+        selection_mode = "fixed_threshold"
+        thr = float(args.fixed_threshold)
+        metrics_thr = eval_threshold(labels, scores_best, thr)
+    elif args.target_teacher_rate is not None:
         selection_mode = f"target_teacher_rate={args.target_teacher_rate}"
-        thr = threshold_for_target_tcr(probs_cal, args.target_teacher_rate)
-        metrics_thr = eval_threshold(y_cal, probs_cal, thr)
+        thr = threshold_for_target_tcr(scores_best, args.target_teacher_rate)
+        metrics_thr = eval_threshold(labels, scores_best, thr)
     else:
         selection_mode = "youden_j"
-        thr = youden_threshold(y_cal, probs_cal)
-        metrics_thr = eval_threshold(y_cal, probs_cal, thr)
+        thr = youden_threshold(labels, scores_best)
+        metrics_thr = eval_threshold(labels, scores_best, thr)
 
     best_threshold = metrics_thr["threshold"]
     best_f1 = metrics_thr["val_f1"]
-    best_acc = metrics_thr["val_acc"]
     best_tcr = metrics_thr["val_teacher_call_rate"]
-    preds_best = metrics_thr["preds"]
 
-    print(f"\nLearned UQ Router (Approach B)")
-    print(f" AUROC: {auc_learned:.4f}")
+    print(f"\n=== Calibration for selected signal ({selection_mode}) ===")
+    print(f" Signal: {best_signal}")
     print(f" Threshold: {best_threshold:.4f}")
     print(f" Val F1 @ threshold: {best_f1:.4f}")
-    print(f" Val Acc @ threshold: {best_acc:.4f}")
     print(f" Val Teacher CallRate: {best_tcr:.4f}")
 
-    print(f"\nClassification report (validation):")
-    print(classification_report(
-        y_cal,
-        preds_best,
-        target_names=["student", "teacher"],
-        zero_division=0
-    ))
+    preds_best = (scores_best >= best_threshold).astype(int)
+    print("\nClassification report (selected signal on calibration set):")
+    print(classification_report(labels, preds_best, target_names=["student", "teacher"], zero_division=0))
 
-    print("\nFeature coefficients:")
-    for name, coef in zip(available_features, model.coef_[0]):
-        print(f" {name:<25}: {coef:+.4f}")
+    print("Computing calibration curve...")
+    n_bins = 10
+    bin_edges = np.linspace(scores_best.min(), scores_best.max(), n_bins + 1)
+    cal_data = []
+    for i in range(n_bins):
+        mask = (scores_best >= bin_edges[i]) & (scores_best < bin_edges[i + 1])
+        if mask.sum() == 0:
+            continue
+        bin_conf = scores_best[mask].mean()
+        bin_acc = labels[mask].mean()
+        cal_data.append({
+            "bin_center": bin_conf,
+            "accuracy": bin_acc,
+            "count": int(mask.sum())
+        })
 
-    # Save joblib bundle
-    model_path = os.path.join(args.output_dir, "router_uncertainty_lr.joblib")
-    bundle = {
-        "model": model,
-        "scaler": scaler,
-        "feature_names": available_features,
-    }
-    joblib.dump(bundle, model_path)
-    print(f"\nLearned UQ model saved to {model_path}")
-
-    # Save config
-    config = {
-        "router": "B_Uncertainty",
-        "model_path": model_path,
-        "best_signal": "learned_lr",
-        "threshold": best_threshold,
-        "auroc": auc_learned,
-        "val_f1": best_f1,
-        "val_acc": best_acc,
-        "val_teacher_call_rate": best_tcr,
-        "selection_mode": selection_mode,
-        "target_teacher_rate": args.target_teacher_rate,
-        "calibration_set_size": len(df_cal),
-        "training_set_size": len(df_tr),
-        "feature_names": "|".join(available_features),
-        "seed": args.seed,
-    }
-
-    config_path = os.path.join(args.output_dir, "router_uncertainty_config.csv")
-    pd.DataFrame([config]).to_csv(config_path, index=False)
-    print(f"Uncertainty router config saved to {config_path}")
+    cal_df = pd.DataFrame(cal_data)
+    cal_path = os.path.join(args.output_dir, "uncertainty_calibration_curve.csv")
+    cal_df.to_csv(cal_path, index=False)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    try:
-        fpr, tpr, _ = roc_curve(y_cal, probs_cal)
-        axes[0].plot(fpr, tpr, label=f"Learned UQ LR (AUC={auc_learned:.3f})", color="darkorange")
-        axes[0].plot([0, 1], [0, 1], "k--", label="Random")
-        axes[0].set_xlabel("FPR")
-        axes[0].set_ylabel("TPR")
-        axes[0].set_title("ROC Curve — Learned UQ Router")
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-    except Exception as e:
-        axes[0].text(0.1, 0.5, f"ROC unavailable:\n{e}", fontsize=10)
-        axes[0].set_title("ROC Curve — unavailable")
+    ax = axes[0]
+    for row in results:
+        signal = row["signal"]
+        scores = df_cal[signal].fillna(df_cal[signal].median()).values
+        fpr, tpr, _ = roc_curve(labels, scores)
+        ax.plot(fpr, tpr, label=f"{signal} (AUC={row['auroc']:.3f})")
+    ax.plot([0, 1], [0, 1], "k--", label="Random")
+    ax.set_xlabel("FPR")
+    ax.set_ylabel("TPR")
+    ax.set_title("ROC Curves — UQ Signals")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
 
-    axes[1].hist(probs_cal[y_cal == 0], bins=30, alpha=0.6, label="student", color="steelblue")
-    axes[1].hist(probs_cal[y_cal == 1], bins=30, alpha=0.6, label="teacher", color="crimson")
-    axes[1].axvline(best_threshold, color="black", linestyle="--", label=f"thr={best_threshold:.3f}")
-    axes[1].set_title("Validation probability distribution")
-    axes[1].set_xlabel("Predicted P(teacher)")
-    axes[1].set_ylabel("Count")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    ax2 = axes[1]
+    if len(cal_df) > 0:
+        ax2.plot(cal_df["bin_center"], cal_df["accuracy"], "o-", label="Model")
+        ax2.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
+        ax2.set_xlabel(f"{best_signal}")
+        ax2.set_ylabel("Fraction of label=1")
+        ax2.set_title("Calibration Curve (selected UQ signal)")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plot_path = os.path.join(args.output_dir, "uncertainty_router_analysis.png")
     plt.savefig(plot_path, dpi=150)
     plt.close()
-    print(f"ROC + probability plot saved to {plot_path}")
+    print(f"ROC + calibration plot saved to {plot_path}")
+
+    config = {
+        "router": "B_Uncertainty",
+        "best_signal": best_signal,
+        "threshold": best_threshold,
+        "auroc": best_auroc,
+        "val_f1": best_f1,
+        "val_teacher_call_rate": best_tcr,
+        "selection_mode": selection_mode,
+        "signal_selection_mode": signal_selection_mode,
+        "target_teacher_rate": args.target_teacher_rate,
+        "fixed_threshold": args.fixed_threshold,
+        "fixed_signal": args.fixed_signal,
+        "calibration_set_size": len(df_cal),
+    }
+
+    config_path = os.path.join(args.output_dir, "router_uncertainty_config.csv")
+    pd.DataFrame([config]).to_csv(config_path, index=False)
+    print(f"\nUncertainty router config saved to {config_path}")
+
+    results_df.to_csv(
+        os.path.join(args.output_dir, "uncertainty_all_signals.csv"),
+        index=False
+    )
+    print("All signal results saved to uncertainty_all_signals.csv")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,8 @@
-# data/sampler.py
 import pandas as pd
 
 def sample_train_data(train_path="data/raw/oasst1/train.csv", n_samples=1000, random_state=42):
     """
-    Загружает train.csv и возвращает случайную подвыборку из n_samples.
+    Loading train.csv and return random subset of n_samples.
     """
     df = pd.read_csv(train_path)
     if n_samples > len(df):

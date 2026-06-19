@@ -86,36 +86,6 @@ def main():
     print(f"\nClassification report:")
     print(classification_report(labels, preds, target_names=["student", "teacher"]))
 
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    ax = axes[0]
-    ax.scatter(difficulty, labels + np.random.normal(0, 0.02, len(labels)),
-               alpha=0.3, s=8, c=labels, cmap="RdYlGn_r")
-    ax.axvline(opt_threshold, color="red", linestyle="--",
-               label=f"Threshold={opt_threshold:.3f}")
-    ax.set_xlabel("IRT Difficulty")
-    ax.set_ylabel("Binary Label (0=student OK, 1=teacher needed)")
-    ax.set_title("IRT Difficulty vs. Routing Label")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    ax2 = axes[1]
-    ax2.plot(fpr, tpr, label=f"IRT Router (AUC={auc:.3f})", color="purple")
-    ax2.plot([0, 1], [0, 1], "k--", label="Random")
-    ax2.set_xlabel("FPR")
-    ax2.set_ylabel("TPR")
-    ax2.set_title("ROC Curve — IRT Router")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plot_path = os.path.join(args.output_dir, "irt_router_analysis.png")
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-    print(f"\nPlot saved to {plot_path}")
-    """
-
     print(f"\nCorrelation irt_difficulty with quality metrics:")
     for col in ["rouge1", "rougeL", "bert_f1", "mean_token_entropy"]:
         if col in df_cal.columns:

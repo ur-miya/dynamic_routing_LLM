@@ -17,6 +17,10 @@ build/
 *.joblib
 *.h5
 
+.nfs00000040207934c100000d40
+.nfs00000040207934c200000d42
+tmux-socket-aerzunova
+
 # IDE
 .vscode/
 .idea/
@@ -33,6 +37,7 @@ check_server_info.py
 check_logprobs.py
 check_tokenizer_mismatch.py
 diagnose_student_responses.py
+test_judge.py
 
 # вспомогательные папки
 scripts/routing/diagnostics/

@@ -8,7 +8,6 @@ from tqdm import tqdm
 
 load_dotenv()
 
-# Учитель
 TEACHER_URL = os.getenv("TEACHER_URL")
 TEACHER_API_PATH = "/v1/chat/completions"
 TEACHER_MODEL = os.getenv("TEACHER_MODEL")
@@ -18,7 +17,6 @@ HEADERS = {
     "Authorization": f"Bearer {TEACHER_TOKEN}"
 }
 
-# Ученик
 STUDENT_MODEL_NAME = os.getenv("STUDENT_MODEL_NAME")
 
 def load_student():
@@ -40,7 +38,7 @@ def ask_teacher(question):
         "temperature": 0.7
     }
     
-    print(f"\nОтправляю запрос к учителю с вопросом: {question[:50]}...")
+    print(f"\nQ: {question[:50]}...")
     print(f"URL: {TEACHER_URL}{TEACHER_API_PATH}")
     
     try:
@@ -48,20 +46,19 @@ def ask_teacher(question):
             TEACHER_URL + TEACHER_API_PATH, 
             headers=HEADERS, 
             json=payload, 
-            timeout=120  # увеличили до 120 секунд
+            timeout=120 
         )
         response.raise_for_status()
         result = response.json()
-        print("Получен ответ от учителя")
         return result["choices"][0]["message"]["content"]
     except requests.exceptions.Timeout:
-        print("Таймаут при запросе к учителю")
+        print("Timeout")
         return "ERROR: timeout"
     except requests.exceptions.ConnectionError as e:
-        print(f"Ошибка соединения: {e}")
+        print(f"Connection: {e}")
         return "ERROR: connection"
     except Exception as e:
-        print(f"Другая ошибка: {e}")
+        print(f"Other error: {e}")
         return f"ERROR: {str(e)}"
 
 def ask_student(question, model, tokenizer):
@@ -78,12 +75,8 @@ def ask_student(question, model, tokenizer):
     return response
 
 if __name__ == "__main__":
-    # Загружаем вопросы
     with open("test_prompts.txt", "r") as f:
         questions = [line.strip() for line in f if line.strip()]
-    
-    # Загружаем ученика
-    print("Загружаем ученика...")
     student_model, student_tokenizer = load_student()
     
     results = []
@@ -95,8 +88,7 @@ if __name__ == "__main__":
             "teacher": teacher_answer,
             "student": student_answer
         })
-    
-    # Сохраняем
+
     with open("teacher_student_answers.json", "w") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print("Результаты сохранены в teacher_student_answers.json")
+    print("Results are saved in teacher_student_answers.json")

@@ -32,13 +32,12 @@ def test_teacher(prompt):
         )
         response.raise_for_status()
         result = response.json()
-        # Стандартный формат OpenAI: choices[0].message.content
         if "choices" in result and len(result["choices"]) > 0:
             return result["choices"][0]["message"]["content"]
         else:
             return str(result)
     except Exception as e:
-        return f"Ошибка: {e}"
+        return f"Error: {e}"
 
 if __name__ == "__main__":
     prompt = "Объясни, что такое дистилляция знаний простыми словами. Приведи пример с конкретной задачей."

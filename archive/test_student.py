@@ -8,9 +8,9 @@ load_dotenv()
 MODEL_NAME = os.getenv("STUDENT_MODEL_NAME")
 
 def load_student():
-    print("Загружаем токенизатор...")
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    print("Загружаем модель...")
+    print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         torch_dtype=torch.float16,
