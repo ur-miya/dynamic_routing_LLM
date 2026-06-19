@@ -53,9 +53,9 @@ pip install -r requirements.txt
 2. Run teacher inference to generate answers and token-level logits/log-probs (script: `src/data/run_teacher_inference.py`).
 3. Compute IRT difficulties:
    ```bash
-   python src/data/compute_irt_difficulties.py \
-       --input data/teacher_outputs.jsonl \
-       --output data/irt_difficulties_er.csv
+   python scripts/routing/04_compute_irt.py \
+       --input outputs/teacher_outputs.jsonl \
+       --output outputs/irt_difficulties_er.csv
    ```
 
 ## Running Distillation Experiments
@@ -64,34 +64,28 @@ pip install -r requirements.txt
 
 Soft KD + LoRA:
 ```bash
-bash scripts/run_distillation_soft_kd_lora.sh
+python distillation/train_soft_kd_lora.py
 ```
 
 Distillm2:
 ```bash
-bash scripts/run_distillation_distillm2.sh
+python distillation/train_distillm2.py
 ```
 
 Both scripts should:
 - load teacher logits and references on OASST1 train split,
 - train the student,
-- save checkpoints and training logs into `results/distillation/`.
+- save checkpoints and training logs into `outputs/distilled_*/`.
 
 ## Running Routing Experiments
-
-### Baseline (student-only)
-
-```bash
-bash scripts/run_routing_student_only.sh
-```
 
 ### Routers A–D
 
 ```bash
-bash scripts/run_routing_router_a.sh
-bash scripts/run_routing_router_b.sh
-bash scripts/run_routing_router_c.sh
-bash scripts/run_routing_router_d.sh
+python scripts/routing/05_train_router_classifier.py
+python scripts/routing/06_calibrate_uncertainty_router.py
+python scripts/routing/07_calibrate_irt_router.py
+python scripts/routing/07b_train_hybrid_router.py
 ```
 
 Each script:
@@ -119,14 +113,14 @@ Hybrid router D is used to identify regions where the student underperforms the 
 4. **Student refresh**  
    Periodically, we fine-tune the student on the buffer and recalibrate router D on the new student, closing the loop.
 
-Scripts for this cycle live under `scripts/run_cycle_distill_refresh.sh` and corresponding modules in `src/distillation/` and `src/routing/`.
+<!--Scripts for this cycle live under `scripts/run_cycle_distill_refresh.sh` and corresponding modules in `src/distillation/` and `src/routing/`.-->
 
-## Results
+<!--## Results  -->
 
-On the Distillm2 student and OASST1 test split:
+<!--On the Distillm2 student and OASST1 test split:  -->
 
-- **Student-only baseline**: TCR = _%, ROUGE-1 ≈ _.
-- **Router A (classifier)**: TCR ≈ _%, ROUGE-1 ≈ _
-- **Router B (uncertainty LR)**: TCR = _%, ROUGE-1 ≈ _
-- **Router C (IRT)**: TCR ≈ _%, ROUGE-1 ≈ _, F1(teacher) ≈ _
-- **Router D (hybrid)**: TCR ≈ _%, ROUGE-1 ≈ _, higher AUC-ROC than C (≈ _ vs _).
+<!--- **Student-only baseline**: TCR = _%, ROUGE-1 ≈ _.  -->
+<!--- **Router A (classifier)**: TCR ≈ _%, ROUGE-1 ≈ _  -->
+<!--- **Router B (uncertainty LR)**: TCR = _%, ROUGE-1 ≈ _  -->
+<!--- **Router C (IRT)**: TCR ≈ _%, ROUGE-1 ≈ _, F1(teacher) ≈ _  -->
+<!--- **Router D (hybrid)**: TCR ≈ _%, ROUGE-1 ≈ _, higher AUC-ROC than C (≈ _ vs _).  -->
