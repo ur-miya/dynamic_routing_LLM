@@ -13,6 +13,7 @@ build/
 # Данные (если не хотите хранить большие файлы в git)
 /data/raw/
 /data/processed/
+/data/interim/
 *.pkl
 *.joblib
 *.h5
