@@ -1,0 +1,56 @@
+dataset:
+  name: OpenAssistant/oasst1
+  # Immutable Hugging Face dataset commit for reproducible loading.
+  revision: fdf72ae0827c1cda404aff25b6603abec9e3399b
+  config_name: null
+  source_splits:
+    - train
+    - validation
+  cache_dir: null
+  trust_remote_code: false
+
+paths:
+  raw_messages: data/raw/oasst1.jsonl
+  pairs: data/interim/oasst1_pairs.jsonl
+  processed_dir: data/processed
+  stats_dir: artifacts/data
+  log_dir: artifacts/logs/data
+
+filters:
+  language: en
+  deleted: false
+  synthetic: false
+  review_result: true
+  require_nonempty_text: true
+  # Applied to emitted rows only. Root messages remain available internally
+  # while histories are reconstructed.
+  require_parent_id: true
+  require_complete_history: true
+  enforce_role_alternation: true
+  allowed_roles:
+    - prompter
+    - assistant
+  max_history_depth: 64
+
+deduplication:
+  enabled: true
+  unicode_normalization: NFKC
+  collapse_whitespace: true
+  casefold: true
+
+pairs:
+  assistant_role: assistant
+  prompt_role: prompter
+  require_direct_prompter_parent: true
+
+split:
+  train_size: 0.80
+  val_size: 0.10
+  test_size: 0.10
+  random_state: 42
+  group_column: message_tree_id
+  shuffle_output: false
+
+runtime:
+  log_every: 10000
+  overwrite: false

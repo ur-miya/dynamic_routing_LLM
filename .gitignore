@@ -38,9 +38,11 @@ check_logprobs.py
 check_tokenizer_mismatch.py
 diagnose_student_responses.py
 test_judge.py
+03_plot_quality_vs_tcr.py
+compute_teacher_student_rouge.py
 
 # вспомогательные папки
-scripts/routing/diagnostics/
+scripts/routing/checking/
 
 # Выходные данные (результаты генерации, оценки)
 /outputs/
@@ -48,3 +50,6 @@ outputs/
 evaluation_results.json
 teacher_student_answers.json
 test_prompts.txt
+
+archive/
+artifacts/
