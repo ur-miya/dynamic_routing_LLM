@@ -14,6 +14,9 @@ build/
 /data/raw/
 /data/processed/
 /data/interim/
+data/
+data/features/
+data/interim/
 *.pkl
 *.joblib
 *.h5
@@ -54,3 +57,12 @@ test_prompts.txt
 
 archive/
 artifacts/
+
+FEATURE_SCHEMA.md
+requirements-features.txt
+tests/
+.pytest_cache
+
+scripts/02c_irt_features.sh
+configs/irt.yaml
+scripts/02_prompt_features_smoke.sh

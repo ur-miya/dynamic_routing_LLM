@@ -1,0 +1,62 @@
+paths:
+  processed_dir: data/processed
+  output_dir: data/features/prompt
+  final_dir: data/features
+  log_dir: artifacts/logs/features
+  cache_dir: artifacts/cache/features
+  temp_dir: artifacts/tmp/features
+
+data:
+  splits: [train, val, test]
+  chunk_size: 256
+  compression: zstd
+  overwrite: false
+
+base:
+  tokenizer_name: sentence-transformers/all-MiniLM-L6-v2
+  tokenizer_revision: null
+  tokenizer_max_length: 4096
+
+embeddings:
+  # 384 dimensions and a much smaller footprint than all-mpnet-base-v2.
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  revision: null
+  device: auto
+  model_dtype: float16
+  batch_size: 16
+  normalize: true
+  include_context_embedding: false
+  output_dtype: float32
+
+judge:
+  env_file: .env
+  api_base_env: JUDGE_URL
+  api_key_env: JUDGE_TOKEN
+  model_env: JUDGE_MODEL
+  chat_endpoint: /v1/chat/completions
+  models_endpoint: /v1/models
+  timeout_seconds: 120
+  max_retries: 4
+  retry_backoff_seconds: 2.0
+  concurrency: 2
+  temperature: 0.0
+  max_tokens: 256
+  include_history: true
+  response_format_json: true
+  cache_db: artifacts/cache/features/judge.sqlite3
+
+uncertainty:
+  # Must be set only after the actual student has been selected.
+  model_name: null
+  revision: null
+  device: auto
+  dtype: auto
+  trust_remote_code: false
+  max_input_tokens: 512
+  batch_size: 1
+  position_chunk_size: 32
+  include_history: true
+
+assemble:
+  memory_limit: 4GB
+  threads: 2
