@@ -46,15 +46,12 @@ judge:
   cache_db: artifacts/cache/features/judge.sqlite3
 
 uncertainty:
-  # Must be set only after the actual student has been selected.
-  model_name: null
+  model_name: artifacts/models/student/qwen3-1.7b
   revision: null
   device: auto
-  dtype: auto
-  trust_remote_code: false
+  dtype: bfloat16
   max_input_tokens: 512
-  batch_size: 1
-  position_chunk_size: 32
+  position_chunk_size: 8
   include_history: true
 
 assemble:

@@ -134,7 +134,8 @@ def judge_table(rows: list[dict[str, Any]], client: JudgeClient) -> pa.Table:
     columns = key_columns(rows)
     for field in FIELDS: columns[f"judge_{field}"] = pa.array([item[field] for item in values], type=pa.int8())
     columns["judge_overall_normalized"] = pa.array([(item["overall"] - 1) / 4 for item in values], type=pa.float32())
-    columns["judge_rationale"] = pa.array([item["rationale"] for item in values], type=pa.string())
+    #columns["judge_rationale"] = pa.array([item["rationale"] for item in values], type=pa.string())
+    columns["judge_rationale"] = pa.array([item.get("rationale", "") for item in values], type=pa.string())
     return pa.table(columns)
 
 
@@ -163,8 +164,25 @@ class StudentUncertainty:
         prompt_ids = prompt_ids[-maximum:]
         prefix_ids = prefix_ids[-max(0, maximum - len(prompt_ids)):]
         token_ids = prefix_ids + prompt_ids
+        
+        # 
         if len(prompt_ids) < 1 or len(token_ids) < 2:
-            raise ValueError("Prompt is too short for causal-LM uncertainty")
+            vocab_size = max(2, len(self.tokenizer)) 
+            max_entropy = math.log(vocab_size)
+            max_nll = math.log(vocab_size)
+            max_ppl = float(vocab_size)
+            
+            return {
+                "student_prompt_first_entropy": max_entropy,
+                "student_prompt_mean_entropy": max_entropy,
+                "student_prompt_max_entropy": max_entropy,
+                "student_prompt_p90_entropy": max_entropy,
+                "student_prompt_nll": max_nll,
+                "student_prompt_perplexity": max_ppl,
+                "student_prompt_too_short": 1.0, 
+            }
+        
+
         ids = torch.tensor([token_ids], device=self.device)
         first_prompt_index = len(prefix_ids)
         step = max(1, int(self.cfg.get("position_chunk_size", 32)))
@@ -199,6 +217,7 @@ class StudentUncertainty:
         nll = torch.cat(nlls)
         mean_nll = float(nll.mean())
         del ids, past
+        
         return {
             "student_prompt_first_entropy": float(entropy[0]),
             "student_prompt_mean_entropy": float(entropy.mean()),
@@ -206,6 +225,7 @@ class StudentUncertainty:
             "student_prompt_p90_entropy": float(torch.quantile(entropy, .9)),
             "student_prompt_nll": mean_nll,
             "student_prompt_perplexity": math.exp(min(mean_nll, 20.0)),
+            "student_prompt_too_short": 0.0,
         }
 
 

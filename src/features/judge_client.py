@@ -17,7 +17,7 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 FIELDS = ("overall", "reasoning", "domain_knowledge", "instruction_complexity", "context_dependency", "ambiguity")
-SYSTEM = """Evaluate intrinsic difficulty of the current user prompt before seeing any answer. Return only JSON. Use integer scores 1..5 for: overall, reasoning, domain_knowledge, instruction_complexity, context_dependency, ambiguity. Add a short rationale. Do not answer the user prompt."""
+SYSTEM = """Evaluate intrinsic difficulty of the current user prompt before seeing any answer. You MUST return a complete, valid JSON object. Ensure the closing brace } is always present. Do not stop mid-sentence. Use integer scores 1..5 for: overall, reasoning, domain_knowledge, instruction_complexity, context_dependency, ambiguity. Add a short rationale. Do not answer the user prompt."""
 
 
 class JudgeClient:
@@ -95,40 +95,56 @@ class JudgeClient:
     '''
     ###
     @staticmethod
-    def _parse(content: Any) -> dict[str, Any]:
-        if content is None:
-            raise ValueError("Judge returned None content")
-        if isinstance(content, list):
-            # multi-part content: склеиваем текстовые части
-            content = "".join(
-                part.get("text", "") for part in content if isinstance(part, dict)
-            )
-        if not isinstance(content, str):
-            raise ValueError(f"Judge returned non-string content: {type(content)}")
+    def _parse(content: str) -> dict:
+        content = content.strip()
 
-        text = content.strip()
-        
-        if text.startswith("```"):
-            text = text[3:]
-            if text.lower().startswith("json"):
-                text = text[4:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        start_idx = content.find('{')
+        end_idx = content.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            content = content[start_idx:end_idx+1]
 
         try:
-            value = json.loads(text)
-        except json.JSONDecodeError:
-            start, end = text.find("{"), text.rfind("}")
-            if start < 0 or end <= start:
-                raise ValueError(f"Judge returned no JSON: {text[:200]}")
-            value = json.loads(text[start:end + 1])
+            value = json.loads(content)
+        except json.JSONDecodeError as e:
+            logging.warning(f"JSONDecodeError: {e}. Try to fix...")
+            
+            open_braces = content.count('{') - content.count('}')
+            open_brackets = content.count('[') - content.count(']')
+            
+            if content.count('"') % 2 != 0:
+                content += '"'
+                
+            content += ']' * open_brackets
+            content += '}' * open_braces
 
-        for field in FIELDS:
-            value[field] = int(value[field])
-            if not 1 <= value[field] <= 5:
-                raise ValueError(f"Invalid {field}: {value[field]}")
-        value["rationale"] = str(value.get("rationale", ""))[:1000]
+            try:
+                value = json.loads(content)
+            except json.JSONDecodeError:
+                logging.error(f"Не удалось починить JSON. Сырой ответ: {content}")
+                return {
+                    "overall": 0,
+                    "reasoning": 0,
+                    "domain_knowledge": 0,
+                    "instruction_complexity": 0,
+                    "context_dependency": 0,
+                    "rationale": ""
+                } 
+
+        numeric_fields = ['overall', 'reasoning', 'domain_knowledge', 'instruction_complexity', 'context_dependency']
+        for field in numeric_fields:
+            if field in value:
+                try:
+                    value[field] = int(value[field])
+                except (ValueError, TypeError):
+                    logging.warning(f"Поле '{field}' не является числом: {value[field]}")
+                    value[field] = 0
+
         return value
 
     ###
@@ -194,6 +210,7 @@ class JudgeClient:
                 ],
                 "temperature": float(self.cfg.get("temperature", 0)),
                 "max_tokens": int(self.cfg.get("max_tokens", 16384)),
+                "enable_thinking": False,
             }
 
             if self.cfg.get("disable_thinking", True):

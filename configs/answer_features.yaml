@@ -1,0 +1,56 @@
+splits:
+- train
+- val
+- test
+input_pattern: data/generations/{split}_generations.parquet
+component_dir: data/features/answer
+output_pattern: data/features/answer_features_{split}.parquet
+row_group_size: 128
+basic:
+  tokenizer_name: artifacts/models/student/qwen3-1.7b
+  local_files_only: true
+reference:
+  rouge_types:
+  - rouge1
+  - rouge2
+  - rougeL
+  meteor_language: english
+bertscore:
+  model_type: roberta-large
+  batch_size: 1
+  device: cuda
+  lang: en
+  rescale_with_baseline: false
+ppl:
+  model_name: artifacts/models/student/qwen3-1.7b
+  local_files_only: true
+  device_map: auto
+  dtype: auto
+  batch_size: 1
+  max_length: 1024
+reward:
+  model_name: null
+  local_files_only: false
+  device: cuda
+  batch_size: 2
+  max_length: 1024
+judge:
+  env_file: .env
+  base_url_env: JUDGE_URL
+  model_env: JUDGE_MODEL
+  token_env: JUDGE_TOKEN
+  endpoint: /v1/chat/completions
+  timeout_seconds: 180
+  max_retries: 5
+  concurrency: 2
+  cache_path: artifacts/cache/answer_judge.sqlite3
+  temperature: 0.0
+  max_tokens: 2048
+  parse_retries: 2
+  disable_thinking: true
+  response_format_json: true
+  send_top_level_enable_thinking: false
+consistency:
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  device: cuda
+  batch_size: 16

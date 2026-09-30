@@ -1,0 +1,40 @@
+env_file: .env
+
+teacher:
+  backend: openai_api
+  base_url_env: TEACHER_URL
+  api_path_env: TEACHER_API_PATH
+  model_env: TEACHER_MODEL
+  token_env: TEACHER_TOKEN
+  timeout_seconds: 180
+  max_retries: 5
+  retry_base_seconds: 2.0
+  verify_ssl: true
+  prompt_format: qwen_chatml
+  no_think: true
+
+student:
+  backend: hf
+  source_model: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: artifacts/models/student/qwen3-1.7b
+  local_files_only: true
+  token_env: HF_TOKEN
+  trust_remote_code: false
+  dtype: auto
+  device_map: auto
+  low_cpu_mem_usage: true
+  attn_implementation: null
+
+  adapter_path: null
+  adapter_path_env: STUDENT_LORA_PATH
+  merge_adapter: false
+
+  tokenizer:
+    padding_side: left
+    truncation_side: left
+    max_input_tokens: 4096
+
+  chat:
+    enable_thinking: false
+    system_prompt: null

@@ -60,9 +60,13 @@ artifacts/
 
 FEATURE_SCHEMA.md
 requirements-features.txt
+requirements-answer-features.txt
+requirements-generation.txt
 tests/
 .pytest_cache
 
 scripts/02c_irt_features.sh
 configs/irt.yaml
 scripts/02_prompt_features_smoke.sh
+*.bak
+answer_features.yaml.before-bertscore-smoke
