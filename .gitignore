@@ -68,5 +68,17 @@ tests/
 scripts/02c_irt_features.sh
 configs/irt.yaml
 scripts/02_prompt_features_smoke.sh
+scripts/02_online_features_smoke.sh
 *.bak
 answer_features.yaml.before-bertscore-smoke
+
+src/features/answer_judge.py.before-json-schema
+configs/answer_features.yaml.before-json-schema
+src/features/answer_features.py.before-ppl-truncation-fix
+scripts/02_uncertainty_smoke.py
+scripts/02_uncertainty_smoke.sh
+src/features/prompt_features.py.bak_unified_uncertainty
+src/features/online_features.py.bak_unified_uncertainty
+configs/features.yaml.bak_unified_uncertainty
+configs/online_features.yaml.bak_unified_uncertainty
+

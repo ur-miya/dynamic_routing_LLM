@@ -48,6 +48,7 @@ judge:
   max_tokens: 2048
   parse_retries: 2
   disable_thinking: true
+  response_format_schema: true
   response_format_json: true
   send_top_level_enable_thinking: false
 consistency:

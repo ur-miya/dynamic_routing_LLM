@@ -29,6 +29,11 @@ except ImportError:
     from io_utils import AtomicParquetWriter, fixed_vector_array, iter_jsonl, key_columns
     from judge_client import FIELDS, JudgeClient
 
+try:
+    from src.features.student_uncertainty import StudentUncertaintyScorer
+except ModuleNotFoundError:
+    from student_uncertainty import StudentUncertaintyScorer
+
 LOGGER = logging.getLogger("prompt_features")
 WORD_RE = re.compile(r"\b[\w'-]+\b", re.UNICODE)
 SENT_RE = re.compile(r"[.!?]+(?:\s|$)")
@@ -139,98 +144,11 @@ def judge_table(rows: list[dict[str, Any]], client: JudgeClient) -> pa.Table:
     return pa.table(columns)
 
 
-class StudentUncertainty:
-    def __init__(self, cfg: dict[str, Any]):
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        if not cfg.get("model_name"):
-            raise RuntimeError("uncertainty.model_name is null; set the actual student before --uncertainty-only")
-        kwargs: dict[str, Any] = {"trust_remote_code": bool(cfg.get("trust_remote_code", False))}
-        if cfg.get("revision"): kwargs["revision"] = cfg["revision"]
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg["model_name"], **kwargs)
-        dtype = cfg.get("dtype", "auto")
-        if dtype != "auto": kwargs["torch_dtype"] = getattr(torch, dtype)
-        self.model = AutoModelForCausalLM.from_pretrained(cfg["model_name"], **kwargs)
-        self.device = cfg.get("device", "auto")
-        if self.device == "auto": self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model.to(self.device).eval(); self.cfg = cfg; self.torch = torch
-
-    def score(self, prompt: str, history: str) -> dict[str, float]:
-        torch = self.torch
-        prefix = (history + "\nCurrent prompt:\n") if history and self.cfg.get("include_history", True) else ""
-        prefix_ids = self.tokenizer(prefix, add_special_tokens=True)["input_ids"] if prefix else []
-        prompt_ids = self.tokenizer(prompt, add_special_tokens=not prefix_ids)["input_ids"]
-        maximum = int(self.cfg["max_input_tokens"])
-        prompt_ids = prompt_ids[-maximum:]
-        prefix_ids = prefix_ids[-max(0, maximum - len(prompt_ids)):]
-        token_ids = prefix_ids + prompt_ids
-        
-        # 
-        if len(prompt_ids) < 1 or len(token_ids) < 2:
-            vocab_size = max(2, len(self.tokenizer)) 
-            max_entropy = math.log(vocab_size)
-            max_nll = math.log(vocab_size)
-            max_ppl = float(vocab_size)
-            
-            return {
-                "student_prompt_first_entropy": max_entropy,
-                "student_prompt_mean_entropy": max_entropy,
-                "student_prompt_max_entropy": max_entropy,
-                "student_prompt_p90_entropy": max_entropy,
-                "student_prompt_nll": max_nll,
-                "student_prompt_perplexity": max_ppl,
-                "student_prompt_too_short": 1.0, 
-            }
-        
-
-        ids = torch.tensor([token_ids], device=self.device)
-        first_prompt_index = len(prefix_ids)
-        step = max(1, int(self.cfg.get("position_chunk_size", 32)))
-        past = None
-        entropies: list[torch.Tensor] = []
-        nlls: list[torch.Tensor] = []
-        with torch.inference_mode():
-            for source_start in range(0, ids.shape[1] - 1, step):
-                source_end = min(source_start + step, ids.shape[1] - 1)
-                block_ids = ids[:, source_start:source_end]
-                outputs = self.model(
-                    input_ids=block_ids,
-                    past_key_values=past,
-                    use_cache=True,
-                )
-                past = outputs.past_key_values
-                logits = outputs.logits[0].float()
-                absolute_sources = torch.arange(source_start, source_end, device=self.device)
-                mask = absolute_sources + 1 >= first_prompt_index
-                if mask.any():
-                    selected = logits[mask]
-                    targets = ids[0, absolute_sources[mask] + 1]
-                    logp = torch.log_softmax(selected, dim=-1)
-                    probs = logp.exp()
-                    entropies.append((-(probs * logp).sum(-1)).cpu())
-                    nlls.append((-logp.gather(1, targets[:, None]).squeeze(1)).cpu())
-                    del selected, targets, logp, probs
-                del outputs, logits, block_ids, absolute_sources, mask
-        if not entropies:
-            raise ValueError("No prompt-token probabilities were produced")
-        entropy = torch.cat(entropies)
-        nll = torch.cat(nlls)
-        mean_nll = float(nll.mean())
-        del ids, past
-        
-        return {
-            "student_prompt_first_entropy": float(entropy[0]),
-            "student_prompt_mean_entropy": float(entropy.mean()),
-            "student_prompt_max_entropy": float(entropy.max()),
-            "student_prompt_p90_entropy": float(torch.quantile(entropy, .9)),
-            "student_prompt_nll": mean_nll,
-            "student_prompt_perplexity": math.exp(min(mean_nll, 20.0)),
-            "student_prompt_too_short": 0.0,
-        }
 
 
-def uncertainty_table(rows: list[dict[str, Any]], scorer: StudentUncertainty) -> pa.Table:
-    values = [scorer.score(str(row["prompt"]), render_history(row["history"])) for row in rows]
+
+def uncertainty_table(rows: list[dict[str, Any]], scorer: StudentUncertaintyScorer) -> pa.Table:
+    values = [scorer.score(str(row["prompt"]), row.get("history") or []) for row in rows]
     columns = key_columns(rows)
     for field in values[0]: columns[field] = pa.array([item[field] for item in values], type=pa.float32())
     return pa.table(columns)
@@ -251,7 +169,7 @@ def main() -> int:
         if env_file: load_dotenv(env_file, override=False)
         component = JudgeClient(cfg["judge"])
         if args.preflight: component.preflight()
-    else: component = StudentUncertainty(cfg["uncertainty"])
+    else: component = StudentUncertaintyScorer.from_config(cfg["uncertainty"])
     for split in args.splits or cfg["data"]["splits"]:
         source = Path(cfg["paths"]["processed_dir"]) / f"{split}.jsonl"
         output = Path(cfg["paths"]["output_dir"]) / f"{mode}_{split}.parquet"

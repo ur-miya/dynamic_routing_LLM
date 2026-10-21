@@ -46,13 +46,14 @@ judge:
   cache_db: artifacts/cache/features/judge.sqlite3
 
 uncertainty:
-  model_name: artifacts/models/student/qwen3-1.7b
-  revision: null
-  device: auto
-  dtype: bfloat16
   max_input_tokens: 512
   position_chunk_size: 8
   include_history: true
+  truncation_side: left
+  models_config: configs/models.yaml
+  student_section: student
+
+
 
 assemble:
   memory_limit: 4GB

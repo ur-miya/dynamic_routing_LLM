@@ -292,6 +292,48 @@ class AnswerJudge:
             payload["enable_thinking"] = False
 
         if self.cfg.get(
+            "response_format_schema",
+            False,
+        ):
+            score_property = {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+            }
+
+            properties = {
+                "a_correctness": dict(score_property),
+                "a_relevance": dict(score_property),
+                "a_helpfulness": dict(score_property),
+                "a_overall": dict(score_property),
+                "b_correctness": dict(score_property),
+                "b_relevance": dict(score_property),
+                "b_helpfulness": dict(score_property),
+                "b_overall": dict(score_property),
+                "preferred": {
+                    "type": "string",
+                    "enum": ["A", "B", "tie"],
+                },
+                "rationale": {
+                    "type": "string",
+                },
+            }
+
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer_judgement",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": list(properties),
+                        "additionalProperties": False,
+                    },
+                },
+            }
+
+        elif self.cfg.get(
             "response_format_json",
             True,
         ):

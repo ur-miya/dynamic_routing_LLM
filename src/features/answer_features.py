@@ -57,33 +57,122 @@ async def judge_mode(rows,cfg):
             try:return {**ids(r),**await j.score(r.get("prompt",""),r.get("reply",""),r.get("TGO",""),r.get("SGO","")),"answer_judge_status":"ok"}
             except Exception as e:return {**ids(r),"answer_judge_status":"error","answer_judge_error":str(e)}
     return await asyncio.gather(*(one(r) for r in rows))
-def evaluator_ppl(rows,cfg):
+def evaluator_ppl(rows, cfg):
+    import math
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model_name=cfg["model_name"]
-    tok=AutoTokenizer.from_pretrained(model_name,local_files_only=cfg.get("local_files_only",True),trust_remote_code=True)
-    dtype_name=cfg.get("dtype","auto")
-    dtype="auto" if dtype_name=="auto" else getattr(torch,dtype_name)
-    model=AutoModelForCausalLM.from_pretrained(model_name,local_files_only=cfg.get("local_files_only",True),torch_dtype=dtype,device_map=cfg.get("device_map","auto"),trust_remote_code=True).eval()
-    device=next(model.parameters()).device; out=[]
-    for r in rows:
-        x=ids(r)
-        prompt=r.get("prompt","")
-        for answer,name in ((r.get("TGO",""),"tgo"),(r.get("SGO",""),"sgo")):
-            messages=[{"role":"user","content":prompt}]
-            prefix=tok.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
-            prefix_ids=tok(prefix,add_special_tokens=False)["input_ids"]
-            batch=tok(prefix+answer,return_tensors="pt",truncation=True,max_length=cfg.get("max_length",1024)).to(device)
-            ids_full=batch["input_ids"]
-            with torch.inference_mode(): logits=model(**batch).logits[:,:-1].float()
-            target=ids_full[:,1:]; lp=torch.log_softmax(logits,dim=-1).gather(-1,target.unsqueeze(-1)).squeeze(-1)
-            start=max(0,min(len(prefix_ids)-1,lp.shape[1])); vals=lp[0,start:]
-            if vals.numel():
-                nll=float(-vals.mean().cpu()); x[f"{name}_evaluator_nll"]=nll; x[f"{name}_evaluator_ppl"]=float(math.exp(min(50,nll))); x[f"{name}_evaluator_tokens"]=int(vals.numel())
-            else:
-                x[f"{name}_evaluator_nll"]=None; x[f"{name}_evaluator_ppl"]=None; x[f"{name}_evaluator_tokens"]=0
-        out.append(x)
-    return out
+
+    model_name = cfg["model_name"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        local_files_only=cfg.get("local_files_only", True),
+        trust_remote_code=True,
+    )
+
+    dtype_name = cfg.get("dtype", "auto")
+    dtype = "auto" if dtype_name == "auto" else getattr(torch, dtype_name)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        local_files_only=cfg.get("local_files_only", True),
+        torch_dtype=dtype,
+        device_map=cfg.get("device_map", "auto"),
+        trust_remote_code=True,
+    ).eval()
+
+    device = next(model.parameters()).device
+    max_length = int(cfg.get("max_length", 1024))
+
+    if max_length < 2:
+        raise ValueError(f"ppl.max_length must be at least 2, got {max_length}")
+
+    output = []
+
+    for row in rows:
+        result = ids(row)
+        prompt = str(row.get("prompt") or "")
+
+        messages = [{"role": "user", "content": prompt}]
+
+        prefix = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        original_prefix_ids = tokenizer(prefix, add_special_tokens=False)["input_ids"]
+
+        if not original_prefix_ids:
+            raise RuntimeError("PPL evaluator produced an empty prompt prefix")
+
+        for answer, name in ((row.get("TGO", ""), "tgo"), (row.get("SGO", ""), "sgo")):
+            answer = str(answer or "")
+
+            answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
+
+            if not answer_ids:
+                raise RuntimeError(f"PPL evaluator received empty {name.upper()}")
+
+            prefix_ids = list(original_prefix_ids)
+            answer_ids = list(answer_ids)
+
+            if len(answer_ids) >= max_length:
+                answer_ids = answer_ids[: max_length - 1]
+
+            prefix_budget = max_length - len(answer_ids)
+
+            if prefix_budget < 1:
+                raise RuntimeError(f"No context space remains for {name.upper()}")
+
+            if len(prefix_ids) > prefix_budget:
+                if prefix_budget == 1:
+                    prefix_ids = prefix_ids[:1]
+                else:
+                    prefix_ids = prefix_ids[:1] + prefix_ids[-(prefix_budget - 1):]
+
+            combined_ids = prefix_ids + answer_ids
+
+            input_ids = torch.tensor([combined_ids], dtype=torch.long, device=device)
+
+            attention_mask = torch.ones_like(input_ids)
+
+            batch = {"input_ids": input_ids, "attention_mask": attention_mask}
+
+            with torch.inference_mode():
+                logits = model(**batch).logits[:, :-1].float()
+
+            targets = input_ids[:, 1:]
+
+            selected_logprobs = torch.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+
+            answer_start = len(prefix_ids) - 1
+            answer_end = answer_start + len(answer_ids)
+
+            answer_logprobs = selected_logprobs[0, answer_start:answer_end]
+
+            if answer_logprobs.numel() == 0:
+                raise RuntimeError(f"No {name.upper()} tokens available for PPL calculation")
+
+            if answer_logprobs.numel() != len(answer_ids):
+                raise RuntimeError(f"{name.upper()} token alignment failed: expected={len(answer_ids)}, actual={answer_logprobs.numel()}")
+
+            if not torch.isfinite(answer_logprobs).all():
+                raise RuntimeError(f"Non-finite {name.upper()} logprobs")
+
+            nll = float(-answer_logprobs.mean().cpu())
+
+            ppl = float(math.exp(min(50.0, nll)))
+
+            if not math.isfinite(nll):
+                raise RuntimeError(f"Non-finite {name.upper()} NLL")
+
+            if not math.isfinite(ppl):
+                raise RuntimeError(f"Non-finite {name.upper()} PPL")
+
+            result[f"{name}_evaluator_nll"] = nll
+            result[f"{name}_evaluator_ppl"] = ppl
+            result[f"{name}_evaluator_tokens"] = int(answer_logprobs.numel())
+
+        output.append(result)
+
+    return output
 
 def reward(rows,cfg):
     if not cfg.get("model_name"): raise RuntimeError("reward.model_name is null")

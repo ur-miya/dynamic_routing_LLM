@@ -1,0 +1,33 @@
+version: 1
+
+student:
+  models_config: configs/models.yaml
+  section: student
+
+length:
+  enabled: true
+
+embedding:
+  enabled: true
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  revision: null
+  device: cpu
+  normalize: true
+  local_files_only: false
+  cache_folder: null
+
+prompt_uncertainty:
+  enabled: true
+  include_history: true
+  max_input_tokens: 512
+  empty_cuda_cache_after_request: false
+  position_chunk_size: 8
+  truncation_side: left
+
+# These features are added only after SGO generation if its token logprobs exist.
+generation_confidence:
+  enabled: true
+  low_logprob_threshold: -2.302585092994046  # log(0.1)
+
+runtime:
+  serialize_model_calls: true

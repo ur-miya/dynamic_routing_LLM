@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"; CONFIG="${CONFIG:-configs/features.yaml}"; MODE="${MODE:-core}"
 COMMON=(--config "$CONFIG" --log-level "${LOG_LEVEL:-INFO}")
 [[ -n "${SPLITS:-}" ]] && read -r -a S <<< "$SPLITS" && COMMON+=(--splits "${S[@]}")
