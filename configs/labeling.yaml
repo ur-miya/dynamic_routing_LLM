@@ -1,0 +1,40 @@
+splits: [train, val, test]
+
+paths:
+  generations: data/generations/{split}_generations.parquet
+  answer_features: data/features/answer_features_{split}.parquet
+  output_dir: data/labeled
+  reports_dir: artifacts/labeling
+
+runtime:
+  memory_limit: 1GB
+  threads: 2
+  temp_directory: artifacts/tmp/labeling
+
+join:
+  # auto: pair_id, если он есть в обоих файлах, иначе prompt_id.
+  # Выбранный ключ должен быть уникальным и непустым.
+  key: auto
+
+quality:
+  metric: bertscore
+
+  teacher_column: tgo_bertscore_f1
+  student_column: sgo_bertscore_f1
+  reply_column: null
+
+  scale: 1.0
+  offset: 0.0
+  higher_is_better: true
+
+  threshold_easy: 0.02
+  threshold_hard: 0.10
+  thresholds_confirmed: false
+
+  use_reply_anchor: false
+  anchor_note: null
+
+  invalid_policy: error
+
+output:
+  compression: zstd

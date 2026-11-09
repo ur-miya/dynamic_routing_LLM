@@ -62,6 +62,7 @@ FEATURE_SCHEMA.md
 requirements-features.txt
 requirements-answer-features.txt
 requirements-generation.txt
+requirements-quality-audit.txt
 tests/
 .pytest_cache
 
@@ -81,4 +82,12 @@ src/features/prompt_features.py.bak_unified_uncertainty
 src/features/online_features.py.bak_unified_uncertainty
 configs/features.yaml.bak_unified_uncertainty
 configs/online_features.yaml.bak_unified_uncertainty
+scripts/audit_answer_representation.py
+scripts/audit_reference_metadata.py
+scripts/judge_pilot_v1.py
+configs/judge_pilot_v1.yaml
+src/audit
+configs/router_baselines_v1.requirements.txt
+src/labeling/
+
 

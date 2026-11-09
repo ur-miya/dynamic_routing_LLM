@@ -1,0 +1,49 @@
+version: 1
+models_config: configs/models.yaml
+student_section: student
+
+environment:
+  env_file: .env
+
+student_generation:
+  max_input_tokens: 4096
+  max_new_tokens: 512
+  do_sample: false
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  repetition_penalty: 1.0
+  enable_thinking: false
+  seed: 42
+
+teacher:
+  url_env: TEACHER_URL
+  token_env: TEACHER_TOKEN
+  model_env: TEACHER_MODEL
+  endpoint: /v1/chat/completions
+  timeout_seconds: 120
+  max_retries: 4
+  retry_backoff_seconds: 2.0
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+
+routing:
+  policy: confidence
+  confidence_metric: token_probability_geomean
+  threshold: 0.20
+  escalate_on_empty: true
+  escalate_on_student_error: true
+  escalate_on_length_limit: true
+
+logging:
+  directory: data/cascade
+  filename_pattern: "%Y-%m-%d_logs.jsonl"
+  fsync: true
+  store_history: true
+  store_token_logprobs: false
+  max_error_chars: 1000
+
+aggregation:
+  output: data/cascade/aggregated.parquet
+  batch_size: 1024

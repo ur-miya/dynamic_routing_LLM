@@ -1,0 +1,43 @@
+version: router-pool2-1
+seed: 42
+threads: 4
+
+paths:
+  labels: data/labeled/weak_v1/{split}_labeled.parquet
+  base: data/features/prompt/base_{split}.parquet
+  embeddings: data/features/prompt/embeddings_{split}.parquet
+  uncertainty: data/features/prompt/uncertainty_{split}.parquet
+
+expected_eligible:
+  train: 15317
+  val: 1847
+
+output_root: artifacts/router/second_pool_v1
+
+# Первый пул не переобучается.
+# Результаты включаются в общую таблицу после сверки входных файлов.
+baseline_pointer: artifacts/router/first_pool_v1/latest_run.txt
+
+smoke_per_class: 40
+
+logistic_regression:
+  C: [0.1, 1.0, 10.0]
+  class_weight: [null, balanced]
+  max_iter: 3000
+  tol: 0.0001
+
+hist_gradient_boosting:
+  max_leaf_nodes: [15, 31]
+  class_weight: [null, balanced]
+  max_iter: 200
+  learning_rate: 0.05
+  min_samples_leaf: 30
+  l2_regularization: 1.0
+
+mlp:
+  hidden_sizes: [64, 128]
+  seeds: [42, 43, 44]
+  max_epochs: 200
+  alpha: 0.01
+  learning_rate_init: 0.001
+  batch_size: 256

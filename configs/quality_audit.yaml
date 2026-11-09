@@ -1,0 +1,63 @@
+paths:
+  generations: data/generations/train_generations.parquet
+  answer_features: data/features/answer_features_train.parquet
+  output: artifacts/quality_audit/v1
+
+runtime:
+  memory_limit: 1GB
+  threads: 2
+  temp_directory: artifacts/tmp/quality_audit
+
+key: pair_id
+seed: 42
+
+judge:
+  status_column: answer_judge_status
+  accepted_statuses: [ok]
+
+metrics:
+  bertscore:
+    teacher: tgo_bertscore_f1
+    student: sgo_bertscore_f1
+    family: reference
+    transform: identity
+
+  meteor:
+    teacher: tgo_meteor
+    student: sgo_meteor
+    family: reference
+    transform: identity
+
+  judge_correctness:
+    teacher: tgo_judge_correctness
+    student: sgo_judge_correctness
+    family: judge
+    transform: range
+    # Заполнить по РУБРИКЕ judge, а не по наблюдаемому минимуму/максимуму.
+    minimum: null
+    maximum: null
+
+  judge_overall:
+    teacher: tgo_judge_overall
+    student: sgo_judge_overall
+    family: judge
+    transform: range
+    minimum: null
+    maximum: null
+
+sampling:
+  development_uniform: 120
+  development_disagreement: 40
+  holdout_uniform: 40
+
+  # Около четверти деревьев резервируется до отбора примеров.
+  holdout_fraction: 0.25
+
+  # Референс не показываем по умолчанию:
+  # он не должен автоматически считаться единственным верным ответом.
+  include_reference: false
+
+comparison:
+  minimum_development_labels: 40
+  minimum_per_decisive_class: 5
+  folds: 5

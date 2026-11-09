@@ -1,0 +1,35 @@
+# Specification only. Do NOT pass this file to the legacy label_complexity.py.
+policy_version: weak-label-overall-robust-v1
+policy_status: proposed_for_freeze_before_full_run
+supervision: judge_derived_weak_labels
+human_validation: false
+condition: full_no_reference
+orders: [teacher_first, student_first]
+quality:
+  rubric_range: [1, 5]
+  scalar: overall
+  normalization: '(mean_order_score - 1) / 4'
+  delta: q_T - q_S
+  observed_low: min(order_delta_1, order_delta_2)
+  observed_high: max(order_delta_1, order_delta_2)
+labels:
+  easy: 'reliable AND observed_high <= 0.0'
+  hard: 'reliable AND observed_low >= 0.5'
+  medium: 'reliable AND neither easy nor hard'
+  unreliable: 'label=null; separate status; never coerce to medium'
+reliability:
+  require_two_valid_judgeable_orders: true
+  require_mapped_preference_agreement: true
+  require_preference_score_direction_compatibility: true
+  allow_stable_preference_with_zero_score_difference: true
+training:
+  require_reliable: true
+  exclude_stable_both_unacceptable: true
+kd_candidate:
+  require_hard: true
+  require_stable_teacher_acceptable: true
+provenance:
+  exact_pilot_rubric_and_parser: pending_actual_python_source
+  deployment_identity: pending_recorded_checkpoint_or_server_manifest
+  no_reference_sent: true
+  do_not_send_ranks_finish_reasons_or_model_identities_as_judge_metadata: true

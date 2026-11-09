@@ -1,0 +1,21 @@
+version: judge-batch-1.0
+splits: [train, val, test]
+pilot_source: scripts/judge_pilot_v1.py
+pilot_config: configs/judge_pilot_v1.yaml
+output: artifacts/labeling/weak_v1/batch
+paths:
+  generations: data/generations/{split}_generations.parquet
+  processed: data/processed/{split}.jsonl
+  labeled_dir: data/labeled/weak_v1
+runtime:
+  memory_limit: 1GB
+  threads: 2
+  temp_directory: artifacts/tmp/judge_batch_v1
+  progress_every: 20
+# Deterministic evaluation protection; no random resplit or source-row deletion.
+context_overlap_policy: keep_test_then_val_then_train
+# No chars/4 proof of capacity, and no silent client-side trimming.
+# API must reject too-long requests. An HTTP 4xx stops the run.
+context_capacity_policy: server_reject_without_truncation
+# Across ALL invocations, including failed/interrupted requests; actual ceiling also <= planned_tasks*attempts_per_task.
+max_total_http_attempts: 96796

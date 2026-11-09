@@ -12,6 +12,7 @@ teacher:
   verify_ssl: true
   prompt_format: qwen_chatml
   no_think: true
+  max_new_tokens: 2048
 
 student:
   backend: hf

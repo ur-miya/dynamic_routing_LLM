@@ -1,0 +1,14 @@
+# CPU-only preparation; NOT a judge/batch configuration.
+splits: [train, val, test]
+paths:
+  generations: data/generations/{split}_generations.parquet
+  answer_features: data/features/answer_features_{split}.parquet
+  processed: data/processed/{split}.jsonl
+  pilot_config: configs/judge_pilot_v1.yaml
+  # Pass --pilot-source after locating the actually used Python script.
+  pilot_source: null
+  output: artifacts/labeling/weak_v1/preflight
+runtime:
+  memory_limit: 1GB
+  threads: 2
+  temp_directory: artifacts/tmp/full_labeling_preflight

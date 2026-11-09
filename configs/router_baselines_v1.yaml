@@ -1,0 +1,27 @@
+version: router-baselines-1
+seed: 42
+threads: 4
+
+paths:
+  labels: data/labeled/weak_v1/{split}_labeled.parquet
+  base: data/features/prompt/base_{split}.parquet
+  embeddings: data/features/prompt/embeddings_{split}.parquet
+
+output_root: artifacts/router/first_pool_v1
+
+# Контроль того, что используется именно зафиксированная популяция.
+# Это количества train_eligible=true, а не размеры исходных файлов.
+expected_eligible:
+  train: 15317
+  val: 1847
+  test: 1975
+
+logistic_regression:
+  C: [0.1, 1.0, 10.0]
+  class_weight: [null, balanced]
+  max_iter: 3000
+  tol: 0.0001
+
+# Только для технического smoke.
+# Читаются реальные Parquet, затем берётся до N строк каждого класса.
+smoke_per_class: 40
