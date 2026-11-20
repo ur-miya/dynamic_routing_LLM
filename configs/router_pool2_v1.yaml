@@ -16,7 +16,7 @@ output_root: artifacts/router/second_pool_v1
 
 # Первый пул не переобучается.
 # Результаты включаются в общую таблицу после сверки входных файлов.
-baseline_pointer: artifacts/router/first_pool_v1/latest_run.txt
+baseline_pointer: artifacts/router/first_pool_v1/frozen_baseline_pool2.txt
 
 smoke_per_class: 40
 

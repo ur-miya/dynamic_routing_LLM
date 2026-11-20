@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse
+import hashlib
+import importlib.util
+import json
+import sys
+import zipfile
+from pathlib import Path
+from datetime import datetime,timezone
+import numpy as np
+import pandas as pd
+import joblib
+from threadpoolctl import threadpool_limits
+ROOT=Path(__file__).resolve().parents[1]
+CONTRACT='generation-token-raw-fp32-eager-v3'
+FINALISTS=['direct_LR_BE','direct_LR_BEU','direct_Ridge_BE','direct_Ridge_BEU','hybrid_A','hybrid_B']
+PAIRS=[('direct_LR_BE','direct_LR_BEU'),('direct_LR_BE','direct_Ridge_BE'),('direct_LR_BE','direct_Ridge_BEU'),('direct_LR_BE','hybrid_A'),('direct_LR_BE','hybrid_B'),('direct_Ridge_BE','hybrid_A'),('direct_LR_BEU','hybrid_B'),('cascade_A','hybrid_A'),('cascade_B','hybrid_B')]
+SEEDS=[42,43,44]
+
+def sha(path):
+    h=hashlib.sha256()
+    with open(path,'rb') as f:
+        for block in iter(lambda:f.read(1024*1024),b''):h.update(block)
+    return h.hexdigest()
+
+def fingerprint(paths):
+    cache={};out={}
+    for key,path in paths.items():
+        path=str(Path(path).resolve())
+        if path not in cache:cache[path]=sha(path)
+        out[key]={'path':path,'sha256':cache[path]}
+    return out
+
+def dump(path,obj):Path(path).write_text(json.dumps(obj,ensure_ascii=False,indent=2,allow_nan=False)+'\n',encoding='utf-8')
+
+def load_local(name,path):
+    spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+def replay_threshold(frame,entry):
+    method=entry['method']
+    selected=np.zeros(len(frame),bool) if method.startswith('direct_') else frame['mandatory_'+method[-1]].to_numpy(bool).copy()
+    if method.startswith('hybrid_'):selected|=frame['pre_teacher'].to_numpy(bool)
+    if not entry['optional_disabled']:selected|=(~selected)&(frame['score_'+method].to_numpy(np.float64)>=np.float64(entry['threshold']))
+    return selected
+
+def verify_recorded_inputs(records):
+    actual=fingerprint({key:item['path'] for key,item in records.items()})
+    problems=[]
+    for key,expected in records.items():
+        observed=actual[key]
+        if observed['sha256']!=expected['sha256']:
+            problems.append(f"{key}: SHA256 mismatch; path={expected['path']}")
+        if 'bytes' in expected:
+            size=Path(expected['path']).stat().st_size
+            if size!=expected['bytes']:
+                problems.append(f"{key}: size mismatch; expected={expected['bytes']}, actual={size}")
+    if problems:
+        raise ValueError('Corrected replay input changed:\n'+'\n'.join(problems))
+
+
+def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument('--replay-run',default='artifacts/scoring_v3/validation_replay_v1/run_20261115T131250_734451Z')
+    ap.add_argument('--smoke',action='store_true')
+    ap.add_argument(
+        '--canonical-run',
+        default='artifacts/parity/inmemory_routing_v3/run_20261120T171656_467085Z',
+    )
+    ap.add_argument(
+        '--registry',
+        default='artifacts/scoring_v3/robustness_v1/run_20261115T134207_529473Z/registry_draft.json',
+    )
+    args=ap.parse_args()
+    base=Path(args.replay_run);rm=json.loads((base/'manifest.json').read_text())
+    if rm['status']!='complete' or rm['smoke'] or rm['scoring_contract']!=CONTRACT:raise ValueError('Complete corrected replay required')
+    if rm['new_models_trained']!=2 or rm['fit_rows']!=12946 or rm['alpha']!=100:raise ValueError('Candidate configuration changed')
+    expected=rm['inputs']
+    verify_recorded_inputs(expected)
+    sys.path.insert(0,str(ROOT))
+    rb=load_local('corrected_robustness_reuse',ROOT/'scripts/experiment_val_robustness_v1.py')
+    update=load_local('corrected_update_reuse',ROOT/'scripts/update_gates_replay_v3.py')
+    length=load_local('corrected_length_reuse',ROOT/'scripts/experiment_length_ablation_v1.py')
+    r=length.v.r
+    if rm['versions']!=r.versions():raise ValueError('Environment changed')
+    frozen_path=Path(expected['freeze']['path']);frozen=json.loads(frozen_path.read_text())
+    frame=pd.read_parquet(base/'val_decisions.parquet')
+    tree_path=Path(frozen['input_provenance']['tree_mapping']['path'])
+    if sha(tree_path)!=frozen['input_provenance']['tree_mapping']['sha256']:raise ValueError('Tree map changed')
+    frame,_=rb.mapping_from_labels(frame,'unused',str(tree_path))
+    if len(frame)!=1847:raise ValueError('Eligible population changed')
+    audit=[]
+    gate_path=base/'gate_PROMPT_SGO.joblib';gate=joblib.load(gate_path)
+    if gate['scoring_contract']!=CONTRACT or gate['alpha']!=100:raise ValueError('Wrong corrected gate')
+    audit.append({'method':'hybrid_A_B',**rb.audit_estimator(gate['model'])})
+    for method in FINALISTS[:4]:
+        entry=next(x for x in frozen['policies'] if x['method']==method)
+        bundle=joblib.load(entry['model']['path'])
+        estimators=bundle.get('models')
+        if estimators is None:estimators=[bundle['estimator'] if 'estimator' in bundle else bundle['model']]
+        for model in estimators:audit.append({'method':method,**rb.audit_estimator(model)})
+    if not all(x['seed_independent_solver'] for x in audit):raise ValueError('Stochastic/unknown solver: stop; no unplanned refit')
+    scored=update.align_scored(frame,pd.read_parquet(expected['scoring_val']['path']))
+    prompt=r.load_split(gate['prompt_config'],'val',use_embeddings=True,expected_dim=gate['embedding_dim'])
+    if not prompt['meta'][r.KEYS].equals(frame[r.KEYS]):raise ValueError('Prompt validation alignment failed')
+    combined=np.concatenate([scored[update.FEATURES].to_numpy(float),prompt['X']],axis=1)
+    with threadpool_limits(limits=4):prediction=gate['model'].predict(combined)
+    np.testing.assert_allclose(prediction,frame['score_cascade_A'],atol=1e-12,rtol=0)
+    matched=pd.read_csv(base/'matched_comparison.csv');nominal=pd.read_csv(base/'nominal_comparison.csv')
+    protocol=json.loads((base/'policies.json').read_text());policy_index={(x['method'],float(x['budget'])):x for x in protocol['policies']}
+
+    # Preserve the legacy exact-control columns; replace only threshold inputs.
+    canonical_root = Path(args.canonical_run)
+    canonical_manifest_path = canonical_root / 'manifest.json'
+    canonical_manifest = json.loads(canonical_manifest_path.read_text())
+    if canonical_manifest['status'] != 'complete' or canonical_manifest['smoke']:
+        raise ValueError('Complete canonical single-request run required')
+    if canonical_manifest['rows'] != len(frame):
+        raise ValueError('Canonical population size differs')
+    for key in (
+        'raw_matrix_exact_parity',
+        'single_request_score_exact_parity',
+        'fixed_policy_decision_parity',
+    ):
+        if canonical_manifest.get(key) is not True:
+            raise ValueError(f'Missing canonical check: {key}')
+    for path, digest in canonical_manifest['inputs_sha256'].items():
+        if sha(path) != digest:
+            raise ValueError(f'Canonical input changed: {path}')
+
+    registry_path = Path(args.registry)
+    canonical_registry = json.loads(registry_path.read_text())
+    if canonical_registry['routing_protocol'] != protocol:
+        raise ValueError('Canonical registry thresholds differ from replay')
+    canonical_records = canonical_registry['policies']
+    if len(canonical_records) != 37:
+        raise ValueError('Expected 37 unchanged policies')
+    if len({x['policy_id'] for x in canonical_records}) != 37:
+        raise ValueError('Duplicate policy IDs')
+
+    def align_canonical(table):
+        if table['pair_id'].duplicated().any():
+            raise ValueError('Duplicate canonical pair_id')
+        if set(table['pair_id']) != set(frame['pair_id']):
+            raise ValueError('Canonical pair population differs')
+        return table.set_index('pair_id').loc[frame['pair_id']].reset_index()
+
+    canonical_scores_path = canonical_root / 'canonical_single_scores.parquet'
+    canonical_decisions_path = canonical_root / 'canonical_policy_decisions.parquet'
+    canonical_summary_path = canonical_root / 'fixed_policy_summary.csv'
+    canonical_scores = align_canonical(pd.read_parquet(canonical_scores_path))
+    canonical_decisions = pd.read_parquet(canonical_decisions_path)
+    canonical_summary = pd.read_csv(canonical_summary_path)
+
+    if canonical_decisions.duplicated(['policy_id', 'pair_id']).any():
+        raise ValueError('Duplicate canonical policy/pair')
+    if len(canonical_decisions) != 37 * len(frame):
+        raise ValueError('Incomplete canonical decision table')
+    if set(canonical_decisions['policy_id']) != {
+        x['policy_id'] for x in canonical_records
+    }:
+        raise ValueError('Canonical decision policy scope differs')
+
+    expected_scope = {
+        (x['method'], float(x['budget_reference']))
+        for x in canonical_records
+    }
+    legacy_scope = {
+        (row.method, float(row.requested_teacher_fraction))
+        for row in nominal.itertuples()
+        if row.method in FINALISTS + ['cascade_A', 'cascade_B'] and row.feasible
+    }
+    if expected_scope != legacy_scope:
+        raise ValueError('Threshold comparison scope changed; explicit review required')
+
+    for method in FINALISTS + ['cascade_A', 'cascade_B']:
+        key = method if method.startswith('direct_') else 'gate'
+        values_to_use = canonical_scores[key].to_numpy(np.float64)
+        if not np.isfinite(values_to_use).all():
+            raise ValueError(f'Nonfinite canonical scores: {method}')
+        frame['score_' + method] = values_to_use
+
+    frame['pre_teacher'] = (
+        canonical_scores['direct_LR_BE'].to_numpy(np.float64)
+        >= np.float64(protocol['prethreshold'])
+    )
+    canonical_weights = rb.quality_weights(frame)
+
+    for record in canonical_records:
+        method = record['method']
+        budget = float(record['budget_reference'])
+        entry = policy_index[(method, budget)]
+        if record['threshold_policy'] != entry:
+            raise ValueError('Registry threshold entry changed')
+        if method.startswith('hybrid_'):
+            if float(record.get('prethreshold', protocol['prethreshold'])) != float(protocol['prethreshold']):
+                raise ValueError('Unexpected per-policy prethreshold')
+
+        actual = align_canonical(
+            canonical_decisions.loc[
+                canonical_decisions['policy_id'].eq(record['policy_id'])
+            ]
+        )
+        for name in ['teacher', 'student_needed']:
+            if not pd.api.types.is_bool_dtype(actual[name].dtype) or actual[name].isna().any():
+                raise ValueError('Canonical decision flags must be non-null bool')
+        mask = replay_threshold(frame, entry)
+        if not np.array_equal(mask, actual['teacher'].to_numpy(bool)):
+            raise ValueError(f"Canonical threshold reproduction failed: {record['policy_id']}")
+
+        quality = np.where(mask, frame.q_T, frame.q_S).astype(float)
+        row_quality = float(quality.mean())
+        prompt_quality = float(np.average(quality, weights=canonical_weights[:, 1]))
+        saved = canonical_summary.loc[
+            canonical_summary['policy_id'].eq(record['policy_id'])
+        ]
+        if len(saved) != 1:
+            raise ValueError('Missing or duplicate canonical summary')
+        saved = saved.iloc[0]
+        if int(saved.teacher_calls) != int(mask.sum()):
+            raise ValueError('Canonical teacher count differs')
+        if not np.isclose(saved.row_quality, row_quality, atol=1e-12, rtol=0):
+            raise ValueError('Canonical row quality differs')
+        if not np.isclose(saved.equal_prompt_quality, prompt_quality, atol=1e-12, rtol=0):
+            raise ValueError('Canonical equal-prompt quality differs')
+
+        selected = nominal.method.eq(method) & np.isclose(
+            nominal.requested_teacher_fraction, budget
+        )
+        if int(selected.sum()) != 1:
+            raise ValueError('Nonunique nominal comparison point')
+        nominal.loc[selected, 'teacher_calls'] = int(mask.sum())
+        nominal.loc[selected, 'mean_quality'] = row_quality
+        nominal.loc[selected, 'equal_prompt_mean_quality'] = prompt_quality
+
+    budgets=[.1,.5] if args.smoke else [.1,.2,.3,.5,.8]
+    weights=rb.quality_weights(frame)
+    points=[];qualities=[]
+    for view,table in [('exact_legacy_control',matched),('threshold',nominal)]:
+        for method in FINALISTS+['cascade_A','cascade_B']:
+            for budget in budgets:
+                row=table.loc[table.method.eq(method)&np.isclose(table.requested_teacher_fraction,budget)]
+                if len(row)!=1:raise ValueError('Missing comparison point')
+                row=row.iloc[0]
+                if not row['feasible']:continue
+                k=int(np.floor(len(frame)*budget))
+                mask=frame[f'exact_{method}_{k}'].to_numpy(bool) if view=='exact_legacy_control' else replay_threshold(frame,policy_index[(method,budget)])
+                quality=np.where(mask,frame.q_T,frame.q_S).astype(float)
+                if mask.sum()!=int(row.teacher_calls) or not np.isclose(quality.mean(),row.mean_quality,rtol=0,atol=1e-12) or not np.isclose(np.average(quality,weights=weights[:,1]),row.equal_prompt_mean_quality,rtol=0,atol=1e-12):raise ValueError('Fixed policy reproduction failed')
+                points.append({'view':view,'method':method,'budget':budget,'teacher_calls':int(mask.sum())});qualities.append(quality)
+    values=np.column_stack(qualities)
+    estimates=np.stack([np.average(values,axis=0,weights=weights[:,j]) for j in range(2)])
+    index={(x['view'],x['method'],x['budget']):i for i,x in enumerate(points)}
+    contrasts=[]
+    for view in ['exact_legacy_control','threshold']:
+        for budget in budgets:
+            for left,right in PAIRS:
+                a=index.get((view,left,budget));b=index.get((view,right,budget))
+                if a is not None and b is not None:contrasts.append({'view':view,'budget':budget,'left':left,'right':right,'a':a,'b':b})
+    paths={key:Path(item['path']) for key,item in expected.items()}
+    paths.update(replay_manifest=base/'manifest.json',replay_matched=base/'matched_comparison.csv',replay_nominal=base/'nominal_comparison.csv',replay_policies=base/'policies.json',replay_decisions=base/'val_decisions.parquet',corrected_gate=gate_path,corrected_sgo_gate=base/'gate_SGO.joblib',tree_map=tree_path,code=Path(__file__),original_robustness_code=ROOT/'scripts/experiment_val_robustness_v1.py',update_code=ROOT/'scripts/update_gates_replay_v3.py')
+    paths.update(
+        canonical_manifest=canonical_manifest_path,
+        canonical_scores=canonical_scores_path,
+        canonical_decisions=canonical_decisions_path,
+        canonical_summary=canonical_summary_path,
+        canonical_registry=registry_path,
+        source_corrected_robustness=ROOT/'scripts/robustness_corrected_v3.py',
+    )
+    for i, path in enumerate(sorted(canonical_manifest['inputs_sha256'])):
+        paths[f'canonical_dependency:{i}'] = Path(path)
+    before=fingerprint(paths)
+    root=Path('artifacts/scoring_v3/robustness_canonical_v3')/datetime.now(timezone.utc).strftime(('smoke_' if args.smoke else 'run_')+'%Y%m%dT%H%M%S_%fZ')
+    root.mkdir(parents=True,exist_ok=False)
+    draws=100 if args.smoke else 1000
+    manifest={'version':'canonical-threshold-robustness-v3-1','status':'running','smoke':args.smoke,'test_read':False,'new_models_trained':0,'llm_loaded':False,'generation_performed':False,
+              'scoring_contract':CONTRACT,'rows':len(frame),'inputs':before,'versions':r.versions(),'seeds':SEEDS,'draws_per_seed':draws,'budgets':budgets,
+              'points':len(points),'contrasts':len(contrasts),'thresholds_reestimated':False,'overall_parity_verified':False,'policy_reproduction':'passed',
+              'note':'Original resampling procedure and contrast family. Canonical single-request threshold policies plus unchanged legacy exact-budget controls. No canonical exact-budget recomputation, model selection, or threshold search. Conditional validation analysis; not an independent generalization or equivalence claim.',
+              'canonical_run':str(canonical_root.resolve()),
+              'exact_view':'unchanged_legacy_control',
+              'threshold_view':'canonical_single_request',
+              'simultaneous_scope':'All listed contrasts, budgets, unchanged exact_legacy_control and canonical threshold views, and both quality metrics within each cluster scheme. Cluster schemes are separate sensitivity analyses.'}
+    dump(root/'manifest.json',manifest)
+    try:
+        dump(root/'seed_audit.json',audit)
+        intervals=[];paired=[];seed_rows=[];diagnostics=[]
+        names=['row_quality','equal_prompt_quality']
+        with threadpool_limits(limits=4):
+            for scheme in ['prompt_id','context_hash','tree_id']:
+                sample_sets=[]
+                counts=frame.groupby(scheme).size()
+                diagnostics.append({'scheme':scheme,'clusters':len(counts),'repeated_clusters':int((counts>1).sum()),'rows_in_repeated_clusters':int(counts[counts>1].sum()),'max_rows_per_cluster':int(counts.max())})
+                for seed in SEEDS:
+                    samples,_=rb.cluster_bootstrap(values,weights,frame[scheme],draws,seed)
+                    sample_sets.append(samples)
+                    for c in contrasts:
+                        for j,metric in enumerate(names):
+                            delta=samples[:,j,c['b']]-samples[:,j,c['a']];lo,hi=np.quantile(delta,[.025,.975])
+                            seed_rows.append({k:c[k] for k in ['view','budget','left','right']}|{'scheme':scheme,'seed':seed,'metric':metric,'ci_low':float(lo),'ci_high':float(hi)})
+                samples=np.concatenate(sample_sets,axis=0)
+                for i,point in enumerate(points):
+                    for j,metric in enumerate(names):
+                        lo,hi=np.quantile(samples[:,j,i],[.025,.975])
+                        intervals.append(point|{'scheme':scheme,'metric':metric,'estimate':float(estimates[j,i]),'ci_low':float(lo),'ci_high':float(hi)})
+                differences=np.column_stack([samples[:,j,c['b']]-samples[:,j,c['a']] for c in contrasts for j in range(2)])
+                point_diff=np.array([estimates[j,c['b']]-estimates[j,c['a']] for c in contrasts for j in range(2)])
+                sd=differences.std(axis=0,ddof=1);standardized=np.zeros_like(differences)
+                np.divide(np.abs(differences-point_diff),sd,out=standardized,where=sd>1e-15)
+                critical=float(np.quantile(standardized.max(axis=1),.95))
+                for h,(c,j) in enumerate((c,j) for c in contrasts for j in range(2)):
+                    lo,hi=np.quantile(differences[:,h],[.025,.975])
+                    paired.append({k:c[k] for k in ['view','budget','left','right']}|{'scheme':scheme,'metric':names[j],'estimate_right_minus_left':float(point_diff[h]),'ci_low':float(lo),'ci_high':float(hi),'simultaneous_low':float(point_diff[h]-critical*sd[h]),'simultaneous_high':float(point_diff[h]+critical*sd[h]),'bootstrap_fraction_positive':float((differences[:,h]>0).mean()),'draws':len(samples)})
+        pd.DataFrame(points).to_csv(root/'points.csv',index=False)
+        pd.DataFrame(intervals).to_csv(root/'policy_intervals.csv',index=False)
+        pair_table=pd.DataFrame(paired);pair_table.to_csv(root/'paired_intervals.csv',index=False)
+        pd.DataFrame(seed_rows).to_csv(root/'resampling_seed_sensitivity.csv',index=False)
+        pd.DataFrame(diagnostics).to_csv(root/'cluster_diagnostics.csv',index=False)
+        influence=[];tree_scores=[]
+        for tree,positions in frame.groupby('tree_id',sort=True).indices.items():
+            positions=np.asarray(positions);keep=np.ones(len(frame),bool);keep[positions]=False
+            without=np.stack([np.average(values[keep],axis=0,weights=weights[keep,j]) for j in range(2)])
+            for i,point in enumerate(points):tree_scores.append(point|{'tree_id':str(tree),'tree_mean_quality':float(values[positions,i].mean())})
+            for c in contrasts:
+                for j,metric in enumerate(names):
+                    full=estimates[j,c['b']]-estimates[j,c['a']];deleted=without[j,c['b']]-without[j,c['a']]
+                    influence.append({k:c[k] for k in ['view','budget','left','right']}|{'tree_id':str(tree),'metric':metric,'leave_tree_out_delta':float(deleted),'change':float(deleted-full),'sign_changed':bool(full*deleted<0)})
+        influence=pd.DataFrame(influence)
+        influence.groupby(['view','budget','left','right','metric'],as_index=False).agg(min_leave_tree_out_delta=('leave_tree_out_delta','min'),max_leave_tree_out_delta=('leave_tree_out_delta','max'),sign_changed_trees=('sign_changed','sum'),max_absolute_change=('change',lambda a:float(np.abs(a).max()))).to_csv(root/'tree_influence_summary.csv',index=False)
+        pd.DataFrame(tree_scores).groupby(['view','method','budget'],as_index=False).agg(equal_tree_mean_quality=('tree_mean_quality','mean'),tree_quality_std=('tree_mean_quality','std'),trees=('tree_id','size')).to_csv(root/'equal_tree_summary.csv',index=False)
+        dump(root/'registry_draft.json', {
+            **canonical_registry,
+            'status':'draft_not_frozen',
+            'live_approved':False,
+            'test_evaluated':False,
+            'overall_parity_verified':False,
+            'canonical_val_run':str(canonical_root.resolve()),
+            'canonical_robustness_run':str(root.resolve()),
+            'note':'Unchanged model references and numerical thresholds. Canonical threshold statistics; legacy exact controls retained separately. Backend integration and final freeze pending.',
+        })
+        if fingerprint(paths)!=before:raise ValueError('Inputs changed during robustness run')
+        manifest.update(status='complete',clusters={x['scheme']:x['clusters'] for x in diagnostics},paired_interval_rows=len(pair_table))
+        dump(root/'manifest.json',manifest)
+        selected=pair_table.loc[pair_table.scheme.eq('tree_id')]
+        text=f'RUN: {root.resolve()}\nSTATUS: complete\nSMOKE: {args.smoke}\nSCORING_CONTRACT: {CONTRACT}\nPOLICY_REPRODUCTION: PASSED\nMODEL_SEED_AUDIT: deterministic configured solvers\nNEW_MODELS: 0\nTEST_READ: False\nTHRESHOLDS_REESTIMATED: False\nOVERALL_PARITY_VERIFIED: False\n\n=== CLUSTERS ===\n'+pd.DataFrame(diagnostics).to_string(index=False)+'\n\n=== TREE-CLUSTER PAIRED INTERVALS: LEGACY EXACT + CANONICAL THRESHOLD ===\n'+selected.to_string(index=False)
+        (root/'SEND_BACK.txt').write_text(text+'\n')
+        names=['manifest.json','seed_audit.json','points.csv','policy_intervals.csv','paired_intervals.csv','resampling_seed_sensitivity.csv','cluster_diagnostics.csv','tree_influence_summary.csv','equal_tree_summary.csv','registry_draft.json','SEND_BACK.txt']
+        with zipfile.ZipFile(root/'reports.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for name in names:z.write(root/name,name)
+        (root.parent/('latest_smoke.txt' if args.smoke else 'latest_run.txt')).write_text(str(root.resolve())+'\n')
+        print(text);print('REPORTS_ZIP:',root/'reports.zip')
+    except Exception as exc:
+        manifest.update(status='failed',error=f'{type(exc).__name__}: {exc}');dump(root/'manifest.json',manifest);raise
+
+if __name__=='__main__':main()

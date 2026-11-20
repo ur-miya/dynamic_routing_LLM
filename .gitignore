@@ -91,3 +91,12 @@ configs/router_baselines_v1.requirements.txt
 src/labeling/
 
 
+scripts/audit_scoring_v3_tokens.py
+scripts/15_run_scoring_v3_token_audit.sh
+scripts/scoring_v3_core.py
+scripts/pilot_scoring_v3.py
+scripts/16_run_scoring_v3_pilot.sh
+scripts/diagnose_scoring_v3_numeric_v1.py
+scripts/17_run_scoring_v3_numeric_diag.sh
+scripts/pilot_scoring_v3_reference_v2.py
+scripts/18_run_scoring_v3_reference_pilot.sh
